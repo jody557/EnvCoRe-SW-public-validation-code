@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite the EnvCoRe-SW corrected v3 dataset and the archived code release."
+title: "EnvCoRe-SW public reproducibility code, corrected v3"
+version: "corrected_v3_20260707"
+date-released: "2026-07-07"
+authors:
+  - family-names: "Liao"
+    given-names: "Juan"
+  - family-names: "Ruan"
+    given-names: "Yunfei"
+  - family-names: "Liu"
+    given-names: "Zhe"
+preferred-citation:
+  type: data
+  title: "EnvCoRe-SW: A de-identified environmental compliance monitoring report corpus and structured measurement extraction dataset from Southwest China, 2018-2025 (corrected v3)"
+  doi: "10.5281/zenodo.21231126"
+  year: 2026
