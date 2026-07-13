@@ -3,7 +3,7 @@
     "title": "EnvCoRe-SW public validation and figure-generation code",
     "upload_type": "software",
     "publication_date": null,
-    "description": "Version 1.1.0 validates the exact EnvCoRe-SW v5 public ZIP after all v5.5 follow-up corrections. It verifies manifest checksums and CSV metadata; the 19,122 retained/1,392 excluded partition; completed 800-record dual-human-review and 200-record targeted challenge QA; separation of frozen R1/R2 review, HUM_ADJ01 adjudication, deterministic post-review auditing, and final actions; CSV/XLSX and overlap-audit synchronization; record-level application of v5/v5.5 corrections; active schema and controlled vocabularies; table-row-count semantics; column hashes; disclosure controls; and rebuilt figure source data. It does not contain private source reports, readable original report text, source paths, facility names, private crosswalks, or the private extraction and source-review workspace.",
+    "description": "Version 1.1.1 validates the exact EnvCoRe-SW v5 public ZIP after all v5.5 follow-up corrections and corrects the dataset DOI linkage used by v1.1.0. It verifies manifest checksums and CSV metadata; the 19,122 retained/1,392 excluded partition; completed 800-record dual-human-review and 200-record targeted challenge QA; separation of frozen R1/R2 review, HUM_ADJ01 adjudication, deterministic post-review auditing, and final actions; CSV/XLSX and overlap-audit synchronization; record-level application of v5/v5.5 corrections; active schema and controlled vocabularies; table-row-count semantics; column hashes; disclosure controls; and rebuilt figure source data. It does not contain private source reports, readable original report text, source paths, facility names, private crosswalks, or the private extraction and source-review workspace.",
     "access_right": "open",
     "creators": [
       {
@@ -32,17 +32,17 @@
       "Guizhou Province",
       "EnvCoRe-SW"
     ],
-    "version": "1.1.0",
+    "version": "1.1.1",
     "language": "eng",
     "license": "mit",
-    "notes": "Target data DOI: 10.5281/zenodo.21333262. Target data ZIP SHA-256: 48fda91a5dca95c30b5f95e32c1d026410655b38aaad577ef92561ce495f940d. Fill publication_date and add the assigned software version DOI through the Zenodo new-version workflow.",
+    "notes": "Target data DOI: 10.5281/zenodo.21339244. Target data ZIP SHA-256: 36e0bda4a4ffe47427892d88a8ecf7fcfece3e9ef70aa3a2cfff658fa2c4cd9b. Target manifest SHA-256: 8aadd4ff20d97676737f2406dce7b1ca42be6d75ae43a7c41f5c4db0b35745e4. Fill publication_date before submission.",
     "related_identifiers": [
       {
-        "identifier": "10.5281/zenodo.21252350",
+        "identifier": "10.5281/zenodo.21338722",
         "relation": "isNewVersionOf"
       },
       {
-        "identifier": "10.5281/zenodo.21333262",
+        "identifier": "10.5281/zenodo.21339244",
         "relation": "isSupplementTo"
       },
       {

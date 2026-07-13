@@ -34,7 +34,7 @@
     "version": "v5",
     "language": "eng",
     "license": "cc-by-4.0",
-    "notes": "Reserved version DOI: 10.5281/zenodo.21333262. Includes all v5.5 follow-up corrections. Target ZIP SHA-256: 48fda91a5dca95c30b5f95e32c1d026410655b38aaad577ef92561ce495f940d. Geographic scope: Guizhou Province, China; temporal coverage: 2018–2025.",
+    "notes": "Reserved version DOI: 10.5281/zenodo.21339244. Includes all v5.5 follow-up corrections. Target ZIP SHA-256: 36e0bda4a4ffe47427892d88a8ecf7fcfece3e9ef70aa3a2cfff658fa2c4cd9b. Manifest SHA-256: 8aadd4ff20d97676737f2406dce7b1ca42be6d75ae43a7c41f5c4db0b35745e4. Geographic scope: Guizhou Province, China; temporal coverage: 2018–2025.",
     "related_identifiers": [
       {
         "identifier": "10.5281/zenodo.21231126",

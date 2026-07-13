@@ -26,6 +26,7 @@ PUBLIC_SNAPSHOT_PATHS = {
     "LICENSE",
     "README.md",
     "RELEASE_NOTES_v1.1.0.md",
+    "RELEASE_NOTES_v1.1.1.md",
     "requirements.txt",
     "scripts/create_release_zip.py",
     "scripts/envcore_sw_public_release_tools.py",

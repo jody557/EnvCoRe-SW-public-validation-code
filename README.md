@@ -4,13 +4,13 @@ This repository is the public validation companion for the EnvCoRe-SW **v5 data 
 
 > **EnvCoRe-SW: a de-identified inventory and structured environmental measurement dataset derived from environmental compliance monitoring reports in Guizhou Province, Southwest China, 2018–2025**
 
-Software version `1.1.0` targets the v5 archive identified by the following hashes. The local/downloaded filename may differ; **SHA-256 is authoritative**:
+Software version `1.1.1` targets the v5 archive identified by the following hashes. The local/downloaded filename may differ; **SHA-256 is authoritative**:
 
-- ZIP SHA-256: `48fda91a5dca95c30b5f95e32c1d026410655b38aaad577ef92561ce495f940d`
+- ZIP SHA-256: `36e0bda4a4ffe47427892d88a8ecf7fcfece3e9ef70aa3a2cfff658fa2c4cd9b`
 - main-table SHA-256: `1710733cb527d4241ff8fdeef27ac94a3351393d8621d32a405a02822f91f688`
-- manifest SHA-256: `7f4c51c5faeee50c1b6ebb86eae99b6aa157e3a29855fce1b3feb7825044a0cd`
+- manifest SHA-256: `8aadd4ff20d97676737f2406dce7b1ca42be6d75ae43a7c41f5c4db0b35745e4`
 
-The reserved v5 data-version DOI is [10.5281/zenodo.21333262](https://doi.org/10.5281/zenodo.21333262). It identifies the final cross-platform v5 data archive pinned by the hashes above. The previous published data version is [10.5281/zenodo.21231126](https://doi.org/10.5281/zenodo.21231126).
+The reserved v5 data-version DOI is [10.5281/zenodo.21339244](https://doi.org/10.5281/zenodo.21339244). It identifies the final cross-platform v5 data archive pinned by the hashes above. The previous published data version is [10.5281/zenodo.21231126](https://doi.org/10.5281/zenodo.21231126).
 
 ## What this code validates
 
@@ -88,8 +88,8 @@ GitHub Actions runs release-independent tests on Python 3.9, 3.11, and 3.13 for 
 
 ## Release continuity
 
-The previous archived code version is [10.5281/zenodo.21252350](https://doi.org/10.5281/zenodo.21252350), under code concept DOI `10.5281/zenodo.21252349`. It validates corrected-v3 and is not compatible with v5. Publish software `1.1.0` as a new version of that existing code concept record. The associated data version is [10.5281/zenodo.21333262](https://doi.org/10.5281/zenodo.21333262); add the software version DOI only after Zenodo assigns it.
+The immediately preceding archived code version is [10.5281/zenodo.21338722](https://doi.org/10.5281/zenodo.21338722) (`v1.1.0`). It is superseded because it referenced a deleted Zenodo record as the dataset DOI. The earlier corrected-v3 code remains at [10.5281/zenodo.21252350](https://doi.org/10.5281/zenodo.21252350). Publish software `1.1.1` as a new version under code concept DOI `10.5281/zenodo.21252349`. The associated data version is [10.5281/zenodo.21339244](https://doi.org/10.5281/zenodo.21339244). The software version DOI is assigned by Zenodo after archiving and should be linked in the dataset record's Related identifiers; it is not required inside the immutable tagged source archive.
 
 Files under `zenodo/` whose names contain `template` are preparation aids, not directly submittable metadata. Required unassigned values are null/blank, and must be filled with real assigned values in a separate submission copy.
 
-See `RELEASE_NOTES_v1.1.0.md`, `docs/release_linkage.md`, and `zenodo/` for release preparation details.
+See `RELEASE_NOTES_v1.1.1.md`, `docs/release_linkage.md`, and `zenodo/` for release preparation details.

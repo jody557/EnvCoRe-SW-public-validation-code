@@ -1,3 +1,5 @@
+> **Historical/superseded release note.** GitHub/Zenodo software version `1.1.0` was archived before the dataset DOI was corrected. It references the deleted record `10.5281/zenodo.21333262` and is superseded by `1.1.1`, which targets `10.5281/zenodo.21339244`.
+
 # EnvCoRe-SW public validation code 1.1.0 — v5/v5.5 release candidate
 
 Version `1.1.0` aligns the public code with the exact EnvCoRe-SW v5 ZIP after the v5.5 limit-unit, censored-compliance, and arsenic source-unit follow-up.

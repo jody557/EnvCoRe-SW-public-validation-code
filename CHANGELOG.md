@@ -1,6 +1,17 @@
 # Changelog
 
-## 1.1.0 release candidate — 2026-07-13
+## 1.1.1 — 2026-07-13
+
+- Corrected the associated dataset DOI from the deleted/tombstoned record `10.5281/zenodo.21333262` to the reserved v5 data DOI `10.5281/zenodo.21339244`.
+- Rebuilt and re-pinned the cross-platform dataset ZIP (`36e0bda4a4ffe47427892d88a8ecf7fcfece3e9ef70aa3a2cfff658fa2c4cd9b`) and manifest (`8aadd4ff20d97676737f2406dce7b1ca42be6d75ae43a7c41f5c4db0b35745e4`).
+- Clarified the controlled-vocabulary cleanup history by distinguishing the 285-row post-cleanup state from the 286-row current v5.5-regenerated table.
+- Kept the curated main-table hash unchanged.
+- Updated software continuity so `1.1.1` follows archived software DOI `10.5281/zenodo.21338722` under concept DOI `10.5281/zenodo.21252349`.
+- Updated GitHub/Zenodo release instructions and removed circular software-DOI insertion requirements.
+
+## 1.1.0 — 2026-07-13 (superseded)
+
+- Superseded by `1.1.1` because `10.5281/zenodo.21333262` was a deleted Zenodo record, not the dataset DOI.
 
 - Aligned all paths, counts, hashes, QA logic, tests, and release metadata with the EnvCoRe-SW v5 package after v5.5 corrections.
 - Added exact-ZIP validation and comprehensive v5/v5.5 correction regressions.

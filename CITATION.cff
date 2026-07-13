@@ -2,7 +2,7 @@ cff-version: 1.2.0
 message: "If you use this software, please cite the archived code release and the associated EnvCoRe-SW dataset."
 title: "EnvCoRe-SW public validation and figure-generation code"
 type: software
-version: "1.1.0"
+version: "1.1.1"
 abstract: "Standard-library validation and public-derivative rebuilding code for the EnvCoRe-SW v5 data package after the v5.5 correction follow-up."
 authors:
   - family-names: "Liao"
@@ -16,7 +16,7 @@ repository-code: "https://github.com/jody557/EnvCoRe-SW-public-validation-code"
 preferred-citation:
   type: software
   title: "EnvCoRe-SW public validation and figure-generation code"
-  version: "1.1.0"
+  version: "1.1.1"
   year: 2026
   authors:
     - family-names: "Liao"
