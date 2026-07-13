@@ -1,0 +1,56 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      release_url:
+        description: "Public URL of the exact EnvCoRe-SW v5 ZIP; leave blank for fast tests only"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  fast-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.11", "3.13"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Compile all Python files
+        run: python -m compileall -q scripts tests
+      - name: Run release-independent unit tests
+        run: python -m unittest tests.test_unit_helpers -v
+      - name: Verify modular test imports
+        run: python -m unittest tests.test_manifest -v
+
+  full-release-validation:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.release_url != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Download requested release ZIP
+        env:
+          RELEASE_URL: ${{ inputs.release_url }}
+        run: python -c "import os, urllib.request; urllib.request.urlretrieve(os.environ['RELEASE_URL'], 'EnvCoRe-SW_release.zip')"
+      - name: Validate and rebuild all public outputs with resource metrics
+        run: >-
+          /usr/bin/time -v python scripts/envcore_sw_public_release_tools.py
+          --config config/release_config.yaml all
+          --release EnvCoRe-SW_release.zip
+          --out outputs/reproducibility_check --clean
+      - name: Run complete release-dependent test suite
+        env:
+          ENVCORE_RELEASE: EnvCoRe-SW_release.zip
+        run: /usr/bin/time -v python -m unittest discover -s tests -v
