@@ -1,0 +1,3 @@
+resource,old_version,old_version_doi,new_version,new_version_doi,concept_doi,release_date,notes
+dataset,corrected_v3_20260705,10.5281/zenodo.21231126,v5 (v5.5 corrections applied),10.5281/zenodo.21333262,10.5281/zenodo.21231125,,Fill release date; exact uploaded ZIP SHA-256 48fda91a5dca95c30b5f95e32c1d026410655b38aaad577ef92561ce495f940d.
+software,v1.0.0,10.5281/zenodo.21252350,v1.1.0,,10.5281/zenodo.21252349,,Fill assigned DOI/date; create as a new version of the existing software concept record after validation.

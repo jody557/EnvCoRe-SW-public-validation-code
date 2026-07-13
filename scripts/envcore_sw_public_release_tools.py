@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Public reproducibility tools for the EnvCoRe-SW corrected v3 release.
+"""Validate and rebuild public products for the EnvCoRe-SW v5/v5.5 release.
 
-The script intentionally uses only the Python standard library. It validates
-the de-identified public data package and regenerates manuscript-facing counts
-and figure source data from the public CSV files.
+The validator uses only the Python standard library. It operates on the exact
+public ZIP (or an extracted copy) and never accesses private source reports.
 """
 
 from __future__ import annotations
@@ -17,81 +16,363 @@ import shutil
 import sys
 import tempfile
 import zipfile
-from collections import Counter
-from datetime import datetime, timezone
+import xml.etree.ElementTree as ET
+from collections import Counter, defaultdict
+from datetime import date, datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
 
-DATASET_DOI = "https://doi.org/10.5281/zenodo.21231126"
-RELEASE_VERSION = "corrected_v3_20260705"
-EXPECTED_ZIP_SHA256 = "ada5e6ac419fdcaa2488eedf67d220632354115fbf71ef8f872832180f6102a3"
-EXPECTED_ZIP_MD5 = "763f3a37618a3c72e61df9a82b8b1361"
-EXPECTED_ZIP_SIZE_BYTES = 33509037
-
-EXPECTED_TOTAL_FILES_IN_RELEASE = 47
-EXPECTED_MANIFEST_ROWS = 46
-
-EXPECTED_CSV_COUNTS = {
-    "data_public/report_inventory_public.csv": (8265, 14),
-    "data_public/docx_report_metadata_public.csv": (2004, 14),
-    "data_public/docx_table_cells_public.csv": (552375, 7),
-    "data_public/measurement_candidates_public.csv": (43822, 7),
-    "data_public/measurement_row_candidates_standardized_public.csv": (63075, 23),
-    "data_public/measurement_token_candidates_public.csv": (344682, 21),
-    "data_public/measurements_long_draft_public.csv": (21073, 31),
-    "data_public/measurements_long_draft_public_corrected_v3.csv": (20514, 31),
-    "data_public/human_manual_qa_review_template_800_v3_final.csv": (800, 83),
-    "data_public/pollutant_dictionary.csv": (34, 7),
-    "docs/correction_history/frequency_context_false_accept_candidates.csv": (559, 36),
-    "docs/correction_history/ammonia_parameter_mapping_correction_audit.csv": (1096, 38),
-}
-
-KEY_FILES = {
-    "manifest": "public_dataset_manifest.csv",
-    "report_inventory": "data_public/report_inventory_public.csv",
-    "docx_metadata": "data_public/docx_report_metadata_public.csv",
-    "docx_table_cells": "data_public/docx_table_cells_public.csv",
-    "measurement_candidates": "data_public/measurement_candidates_public.csv",
-    "standardized_candidates": "data_public/measurement_row_candidates_standardized_public.csv",
-    "token_candidates": "data_public/measurement_token_candidates_public.csv",
-    "measurements_original": "data_public/measurements_long_draft_public.csv",
-    "measurements_corrected": "data_public/measurements_long_draft_public_corrected_v3.csv",
-    "human_qa": "data_public/human_manual_qa_review_template_800_v3_final.csv",
-    "pollutant_dictionary": "data_public/pollutant_dictionary.csv",
-    "frequency_removed": "docs/correction_history/frequency_context_false_accept_candidates.csv",
-    "ammonia_audit": "docs/correction_history/ammonia_parameter_mapping_correction_audit.csv",
-    "color_audit": "docs/correction_history/color_unit_source_audit.csv",
-    "corrected_generation_summary": "docs/validation/corrected_v3_generation_summary.json",
-    "dataset_schema": "docs/metadata_schema/dataset_schema.csv",
-    "validation_report": "docs/validation/public_release_validation_report_corrected_v3.md",
-}
-
-FIGURE_FILES = {
-    "measurements_by_year": "docs/figure_source_data/figure_data_draft_measurements_by_year_corrected_v3.csv",
-    "measurements_by_medium": "docs/figure_source_data/figure_data_draft_measurements_by_medium_corrected_v3.csv",
-    "measurements_by_parameter": "docs/figure_source_data/figure_data_draft_measurements_by_parameter_corrected_v3.csv",
-    "reports_by_year": "docs/figure_source_data/figure_data_reports_by_year.csv",
-    "reports_by_facility_type": "docs/figure_source_data/figure_data_reports_by_facility_type.csv",
-    "table_layer_scale": "docs/figure_source_data/figure_data_table_derived_layer_scale_corrected_v3.csv",
-}
-
-SENSITIVE_DISCLOSURE_PATTERNS = [
-    ("data_private_path", re.compile(r"data_private[\\/]|\bdata_private\b", re.IGNORECASE)),
-    ("source_crosswalk_private", re.compile(r"source_crosswalk_private", re.IGNORECASE)),
-    ("private_row_text_column", re.compile(r"\brow_text_private\b", re.IGNORECASE)),
-    ("raw_report_text_column", re.compile(r"\braw_report_text\b|\breport_text_raw\b", re.IGNORECASE)),
-    ("local_windows_user_path", re.compile(r"[A-Za-z]:[\\/](Users[\\/]57049|jianhui data|.*?Documents[\\/]Codex)", re.IGNORECASE)),
-    ("source_file_path_column", re.compile(r"\b(source_file_path|original_file_path|absolute_path)\b", re.IGNORECASE)),
-    ("assistant_or_chatgpt_trace", re.compile(r"\b(ChatGPT|OpenAI assistant|assistant_source_context|AI-generated)\b", re.IGNORECASE)),
-]
-
-TEXT_EXTENSIONS_TO_SCAN = {".csv", ".md", ".json", ".txt", ".cff"}
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_CONFIG = REPO_ROOT / "config" / "release_config.yaml"
+ALL_OUTPUT_MARKER = ".envcore_sw_validation_output"
+ALL_OUTPUT_MARKER_CONTENT = "EnvCoRe-SW public validation output; safe for tool-managed cleanup.\n"
+TEXT_EXTENSIONS = {".csv", ".md", ".json", ".txt", ".cff", ".yaml", ".yml", ".bib"}
 ORIGINAL_REPORT_EXTENSIONS = {".doc", ".docx", ".pdf"}
+DOI_RE = re.compile(r"^10\.\d{4,9}/[-._;()/:A-Z0-9]+$", re.IGNORECASE)
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+XLSX_NS = {
+    "main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+    "rel": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+}
+
+
+def _parse_yaml_scalar(value: str) -> object:
+    value = value.strip()
+    if value == "":
+        return ""
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+        return value[1:-1]
+    if value.lower() in {"true", "false"}:
+        return value.lower() == "true"
+    if value.lower() in {"null", "none", "~"}:
+        return None
+    if re.fullmatch(r"-?\d+", value):
+        return int(value)
+    if re.fullmatch(r"-?\d+\.\d+", value):
+        return float(value)
+    return value
+
+
+def load_config(path: Union[Path, str] = DEFAULT_CONFIG) -> Dict[str, object]:
+    """Load the deliberately simple two-level YAML configuration."""
+
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Release configuration not found: {path}")
+    result: Dict[str, object] = {}
+    current_section: Optional[str] = None
+    for line_number, raw in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), start=1):
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip(" "))
+        if ":" not in raw:
+            raise ValueError(f"Invalid configuration line {line_number}: {raw}")
+        key, value = raw.strip().split(":", 1)
+        if indent == 0:
+            if value.strip() == "":
+                result[key] = {}
+                current_section = key
+            else:
+                result[key] = _parse_yaml_scalar(value)
+                current_section = None
+        elif indent == 2 and current_section is not None:
+            section = result[current_section]
+            if not isinstance(section, dict):
+                raise ValueError(f"Configuration section is not a mapping: {current_section}")
+            section[key] = _parse_yaml_scalar(value)
+        else:
+            raise ValueError(f"Only one nested mapping level is supported (line {line_number}).")
+    required = {
+        "dataset_title",
+        "dataset_version",
+        "dataset_correction_state",
+        "main_measurement_file",
+        "dual_qa_csv_file",
+        "challenge_qa_csv_file",
+        "pollutant_dictionary_file",
+        "expected_counts",
+        "data_doi",
+        "code_doi",
+        "geographic_scope",
+        "temporal_start",
+        "temporal_end",
+    }
+    missing = sorted(required - result.keys())
+    if missing:
+        raise ValueError(f"Configuration is missing required keys: {', '.join(missing)}")
+    return result
+
+
+def cfg_path(config: Mapping[str, object], key: str) -> str:
+    value = config.get(key)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"Configuration path {key!r} is missing or empty.")
+    return value.replace("\\", "/")
+
+
+def expected_counts(config: Mapping[str, object]) -> Mapping[str, int]:
+    value = config.get("expected_counts")
+    if not isinstance(value, dict):
+        raise ValueError("expected_counts must be a mapping.")
+    return {str(key): int(count) for key, count in value.items()}
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def csv_header_and_count(path: Path) -> Tuple[List[str], int]:
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.reader(handle)
+        try:
+            header = next(reader)
+        except StopIteration:
+            return [], 0
+        return header, sum(1 for _ in reader)
+
+
+def iter_csv_rows(path: Path) -> Iterator[Dict[str, str]]:
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames is None:
+            raise ValueError(f"CSV has no header: {path}")
+        if len(reader.fieldnames) != len(set(reader.fieldnames)):
+            raise ValueError(f"CSV contains duplicate column names: {path}")
+        for row in reader:
+            yield {str(key): (value if value is not None else "") for key, value in row.items()}
+
+
+def read_csv_rows(path: Path) -> List[Dict[str, str]]:
+    return list(iter_csv_rows(path))
+
+
+def write_csv_rows(path: Path, fieldnames: Sequence[str], rows: Iterable[Mapping[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(fieldnames), lineterminator="\n", extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row.get(key, "") for key in fieldnames})
+
+
+def write_json(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def iter_release_files(root: Path) -> Iterator[Path]:
+    for path in sorted(root.rglob("*")):
+        if path.is_file():
+            yield path
+
+
+def rel_path(root: Path, path: Path) -> str:
+    return path.relative_to(root).as_posix()
+
+
+def _is_inside(child: Path, parent: Path) -> bool:
+    try:
+        child.resolve().relative_to(parent.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _all_output_allowed_paths() -> Tuple[set[str], set[str]]:
+    directories = {"figure_source_data_rebuilt"}
+    files = {
+        ALL_OUTPUT_MARKER,
+        "release_summary.json",
+        "regenerated_manifest.csv",
+        "validation_report.json",
+        "validation_report.md",
+    }
+    files.update(
+        f"figure_source_data_rebuilt/{Path(relative).name}"
+        for relative in FIGURE_PATHS.values()
+    )
+    return directories, files
+
+
+def _is_tool_managed_all_output(path: Path) -> bool:
+    marker = path / ALL_OUTPUT_MARKER
+    if not marker.is_file():
+        return False
+    try:
+        if marker.read_text(encoding="utf-8") != ALL_OUTPUT_MARKER_CONTENT:
+            return False
+    except OSError:
+        return False
+    allowed_directories, allowed_files = _all_output_allowed_paths()
+    for entry in path.rglob("*"):
+        if entry.is_symlink():
+            return False
+        relative = entry.relative_to(path).as_posix()
+        if entry.is_dir():
+            if relative not in allowed_directories:
+                return False
+        elif relative not in allowed_files:
+            return False
+    return True
+
+
+def prepare_all_output_directory(out: Path, clean: bool, release_root: Path) -> None:
+    """Create or safely reset the output tree used by the integrated command."""
+
+    resolved = out.resolve()
+    release_resolved = release_root.resolve()
+    protected = {Path.cwd().resolve(), Path.home().resolve(), REPO_ROOT.resolve(), release_resolved}
+    if resolved == Path(resolved.anchor) or any(
+        resolved == item or _is_inside(item, resolved) for item in protected
+    ):
+        raise ValueError(f"Refusing to use unsafe output path: {resolved}")
+    if _is_inside(resolved, release_resolved):
+        raise ValueError(f"Output path must not be inside the validated release: {resolved}")
+    if out.is_symlink():
+        raise ValueError(f"Output path must not be a symbolic link: {out}")
+    if out.exists():
+        if not out.is_dir():
+            raise ValueError(f"Output path is not a directory: {out}")
+        has_entries = any(out.iterdir())
+        if has_entries and not _is_tool_managed_all_output(out):
+            raise ValueError(
+                f"Refusing to modify an unrecognized non-empty output directory: {resolved}"
+            )
+        if clean and has_entries:
+            shutil.rmtree(out)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / ALL_OUTPUT_MARKER).write_text(ALL_OUTPUT_MARKER_CONTENT, encoding="utf-8")
+
+
+def safe_extract_zip(zip_path: Path, destination: Path) -> None:
+    with zipfile.ZipFile(zip_path) as archive:
+        for member in archive.infolist():
+            name = member.filename.replace("\\", "/")
+            if name.startswith("/") or re.match(r"^[A-Za-z]:", name):
+                raise ValueError(f"Absolute path in ZIP: {member.filename}")
+            target = destination / name
+            if not _is_inside(target, destination):
+                raise ValueError(f"Unsafe path in ZIP: {member.filename}")
+        archive.extractall(destination)
+
+
+def locate_release_root(path: Path, config: Mapping[str, object]) -> Path:
+    path = path.resolve()
+    manifest = cfg_path(config, "manifest_file")
+    if (path / manifest).exists():
+        return path
+    matches = list(path.rglob(manifest))
+    if len(matches) == 1:
+        return matches[0].parent
+    if not matches:
+        raise FileNotFoundError(f"Could not find {manifest} under {path}")
+    raise ValueError(f"Multiple release manifests found under {path}")
+
+
+def prepare_release(
+    path: Path, config: Mapping[str, object]
+) -> Tuple[Path, Optional[tempfile.TemporaryDirectory], Optional[Dict[str, object]]]:
+    if not path.exists():
+        raise FileNotFoundError(path)
+    if path.is_file():
+        if path.suffix.lower() != ".zip":
+            raise ValueError(f"Release file must be a ZIP: {path}")
+        zip_info = {"path": str(path.resolve()), "size_bytes": path.stat().st_size, "sha256": sha256_file(path)}
+        temporary = tempfile.TemporaryDirectory(prefix="envcore_sw_release_")
+        safe_extract_zip(path, Path(temporary.name))
+        return locate_release_root(Path(temporary.name), config), temporary, zip_info
+    return locate_release_root(path, config), None, None
+
+
+def required_files(config: Mapping[str, object]) -> Dict[str, str]:
+    keys = {
+        "manifest": "manifest_file",
+        "report_inventory": "report_inventory_file",
+        "docx_metadata": "docx_metadata_file",
+        "table_cells": "table_cells_file",
+        "measurement_candidates": "measurement_candidates_file",
+        "standardized_rows": "standardized_parameter_rows_file",
+        "numeric_tokens": "numeric_tokens_file",
+        "initial_measurements": "initial_measurement_file",
+        "curated_measurements": "main_measurement_file",
+        "pollutant_dictionary": "pollutant_dictionary_file",
+        "schema": "schema_file",
+        "controlled_vocabularies": "controlled_vocabulary_file",
+        "frequency_removed": "frequency_removed_file",
+        "ammonia_audit": "ammonia_audit_file",
+        "column_hashes": "column_hash_file",
+        "dual_qa_csv": "dual_qa_csv_file",
+        "dual_qa_xlsx": "dual_qa_xlsx_file",
+        "challenge_qa_csv": "challenge_qa_csv_file",
+        "challenge_qa_xlsx": "challenge_qa_xlsx_file",
+        "exclusion_audit": "exclusion_audit_file",
+        "media_corrections": "media_correction_audit_file",
+        "unit_corrections": "unit_correction_audit_file",
+        "floating_value_audit": "floating_value_audit_file",
+        "fecal_limit_unit_audit": "fecal_limit_unit_audit_file",
+        "censored_compliance_audit": "censored_compliance_audit_file",
+        "arsenic_normalization_audit": "arsenic_normalization_audit_file",
+        "qa_stage_summary": "qa_stage_summary_file",
+        "release_build_summary": "release_build_summary_file",
+        "publication_readiness": "publication_readiness_file",
+    }
+    return {name: cfg_path(config, key) for name, key in keys.items()}
+
+
+def expected_table_counts(config: Mapping[str, object]) -> Dict[str, Tuple[int, Optional[int]]]:
+    files = required_files(config)
+    counts = expected_counts(config)
+    return {
+        files["report_inventory"]: (counts["report_inventory"], 14),
+        files["docx_metadata"]: (counts["parsed_docx_reports"], 14),
+        files["table_cells"]: (counts["table_cells"], 7),
+        files["measurement_candidates"]: (counts["measurement_candidates"], 7),
+        files["standardized_rows"]: (counts["standardized_parameter_rows"], 23),
+        files["numeric_tokens"]: (counts["numeric_tokens"], 21),
+        files["initial_measurements"]: (counts["initial_measurements"], 31),
+        files["curated_measurements"]: (counts["curated_measurements"], 31),
+        files["pollutant_dictionary"]: (counts["parameter_codes"], 8),
+        files["frequency_removed"]: (counts["frequency_false_accepts_removed"], 36),
+        files["ammonia_audit"]: (counts["ammonia_parameter_recodes"], 38),
+        files["dual_qa_csv"]: (counts["dual_qa_records"], 89),
+        files["challenge_qa_csv"]: (counts["challenge_qa_records"], 58),
+        files["exclusion_audit"]: (counts["excluded_measurements"], 17),
+        files["media_corrections"]: (counts["media_group_corrections"], 15),
+        files["unit_corrections"]: (counts["unit_corrections"], 15),
+        files["floating_value_audit"]: (counts["floating_value_canonicalizations"], 15),
+        files["fecal_limit_unit_audit"]: (counts["fecal_limit_unit_corrections"], 14),
+        files["censored_compliance_audit"]: (counts["censored_records_reviewed"], 18),
+        files["arsenic_normalization_audit"]: (counts["arsenic_value_normalizations"], 18),
+        files["schema"]: (counts["schema_rows"], 19),
+        files["controlled_vocabularies"]: (counts["controlled_vocabulary_rows"], 9),
+        files["column_hashes"]: (31, 4),
+    }
+
+
+def count_values(rows: Iterable[Mapping[str, str]], field: str) -> Counter:
+    return Counter(row.get(field, "") for row in rows)
+
+
+def duplicate_count(values: Iterable[str]) -> int:
+    seen = set()
+    duplicates = 0
+    for value in values:
+        if value in seen:
+            duplicates += 1
+        else:
+            seen.add(value)
+    return duplicates
 
 
 class ValidationReport:
-    def __init__(self) -> None:
+    def __init__(self, config: Mapping[str, object]) -> None:
+        self.config = config
         self.checks: List[Dict[str, object]] = []
 
     def add(self, name: str, ok: bool, detail: str, observed: object = None, expected: object = None) -> None:
@@ -107,743 +388,911 @@ class ValidationReport:
 
     @property
     def passed(self) -> bool:
-        return all(check["status"] == "PASS" for check in self.checks)
+        return all(item["status"] == "PASS" for item in self.checks)
 
     def to_dict(self) -> Dict[str, object]:
         return {
-            "dataset_doi": DATASET_DOI,
-            "release_version": RELEASE_VERSION,
+            "dataset_title": self.config["dataset_title"],
+            "dataset_version": self.config["dataset_version"],
+            "dataset_correction_state": self.config["dataset_correction_state"],
+            "configured_data_doi": self.config["data_doi"],
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
             "status": "PASS" if self.passed else "FAIL",
             "checks": self.checks,
         }
 
 
-def normalize_rel(path: Path) -> str:
-    return path.as_posix()
+MANIFEST_FIELDS = [
+    "relative_path",
+    "size_bytes",
+    "sha256",
+    "row_count",
+    "column_count",
+    "column_names",
+    "description",
+    "release_role",
+]
 
 
-def sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def md5_file(path: Path) -> str:
-    h = hashlib.md5()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def csv_header_and_count(path: Path) -> Tuple[List[str], int]:
-    with path.open("r", encoding="utf-8-sig", newline="") as f:
-        reader = csv.reader(f)
-        try:
-            header = next(reader)
-        except StopIteration:
-            return [], 0
-        rows = sum(1 for _ in reader)
-    return header, rows
-
-
-def iter_csv_rows(path: Path) -> Iterable[Dict[str, str]]:
-    with path.open("r", encoding="utf-8-sig", newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            yield {k: (v if v is not None else "") for k, v in row.items()}
-
-
-def read_csv_rows(path: Path) -> List[Dict[str, str]]:
-    return list(iter_csv_rows(path))
-
-
-def write_csv_rows(path: Path, fieldnames: List[str], rows: List[Dict[str, object]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames, lineterminator="\n")
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({k: row.get(k, "") for k in fieldnames})
-
-
-def iter_release_files(root: Path) -> Iterable[Path]:
-    for path in sorted(root.rglob("*")):
-        if path.is_file():
-            yield path
-
-
-def _is_inside(child: Path, parent: Path) -> bool:
-    child_resolved = child.resolve()
-    parent_resolved = parent.resolve()
-    try:
-        child_resolved.relative_to(parent_resolved)
-        return True
-    except ValueError:
-        return False
-
-
-def safe_extract_zip(zip_path: Path, dest: Path) -> None:
-    with zipfile.ZipFile(zip_path) as zf:
-        for member in zf.infolist():
-            target = dest / member.filename
-            if not _is_inside(target, dest):
-                raise ValueError(f"Unsafe path in ZIP: {member.filename}")
-        zf.extractall(dest)
-
-
-def locate_release_root(path: Path) -> Path:
-    if (path / KEY_FILES["manifest"]).exists():
-        return path
-    matches = list(path.rglob(KEY_FILES["manifest"]))
-    if len(matches) == 1:
-        return matches[0].parent
-    if not matches:
-        raise FileNotFoundError(f"Could not find {KEY_FILES['manifest']} under {path}")
-    raise ValueError(f"Found multiple manifest files under {path}; provide the release root explicitly.")
-
-
-def prepare_release(path: Path) -> Tuple[Path, Optional[tempfile.TemporaryDirectory], Optional[Dict[str, object]]]:
+def manifest_descriptions(root: Path, config: Mapping[str, object]) -> Dict[str, Tuple[str, str]]:
+    path = root / cfg_path(config, "manifest_file")
     if not path.exists():
-        raise FileNotFoundError(path)
-    if path.is_file() and path.suffix.lower() == ".zip":
-        zip_info = {
-            "path": str(path),
-            "size_bytes": path.stat().st_size,
-            "sha256": sha256_file(path),
-            "md5": md5_file(path),
-        }
-        tmp = tempfile.TemporaryDirectory(prefix="envcore_sw_release_")
-        safe_extract_zip(path, Path(tmp.name))
-        return locate_release_root(Path(tmp.name)), tmp, zip_info
-    return locate_release_root(path), None, None
+        return {}
+    return {
+        row["relative_path"].replace("\\", "/"): (row.get("description", ""), row.get("release_role", ""))
+        for row in read_csv_rows(path)
+    }
 
 
-def rel_path(root: Path, path: Path) -> str:
-    return normalize_rel(path.relative_to(root))
-
-
-def generate_technical_manifest(root: Path) -> List[Dict[str, object]]:
+def generate_manifest_rows(
+    root: Path, descriptions: Optional[Mapping[str, Tuple[str, str]]] = None
+) -> List[Dict[str, object]]:
+    descriptions = descriptions or {}
     rows: List[Dict[str, object]] = []
     for path in iter_release_files(root):
-        relative_path = rel_path(root, path)
-        if relative_path == KEY_FILES["manifest"]:
+        relative = rel_path(root, path)
+        if relative == "public_dataset_manifest.csv":
             continue
-        row_count = ""
-        column_count = ""
-        columns = ""
+        row_count: object = ""
+        column_count: object = ""
+        column_names = ""
         if path.suffix.lower() == ".csv":
             header, count = csv_header_and_count(path)
             row_count = count
             column_count = len(header)
-            columns = ";".join(header)
+            column_names = ";".join(header)
+        description, role = descriptions.get(relative, ("Release documentation or supporting data file.", "supporting"))
         rows.append(
             {
-                "file_name": path.name,
-                "relative_path": relative_path,
-                "file_size_bytes": path.stat().st_size,
+                "relative_path": relative,
+                "size_bytes": path.stat().st_size,
+                "sha256": sha256_file(path),
                 "row_count": row_count,
                 "column_count": column_count,
-                "columns": columns,
-                "sha256": sha256_file(path),
-                "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+                "column_names": column_names,
+                "description": description,
+                "release_role": role,
             }
         )
     return rows
 
 
-def validate_zip_info(zip_info: Optional[Dict[str, object]], report: ValidationReport) -> None:
-    if zip_info is None:
-        report.add("zip checksum", True, "Release was supplied as an extracted directory; ZIP checksum not checked.")
-        return
-    report.add(
-        "zip size",
-        zip_info["size_bytes"] == EXPECTED_ZIP_SIZE_BYTES,
-        "Published ZIP size matches the corrected v3 reference value.",
-        observed=zip_info["size_bytes"],
-        expected=EXPECTED_ZIP_SIZE_BYTES,
-    )
-    report.add(
-        "zip sha256",
-        zip_info["sha256"] == EXPECTED_ZIP_SHA256,
-        "Published ZIP SHA-256 matches the corrected v3 reference value.",
-        observed=zip_info["sha256"],
-        expected=EXPECTED_ZIP_SHA256,
-    )
-    report.add(
-        "zip md5",
-        zip_info["md5"] == EXPECTED_ZIP_MD5,
-        "Published ZIP MD5 matches the corrected v3 Zenodo file checksum.",
-        observed=zip_info["md5"],
-        expected=EXPECTED_ZIP_MD5,
-    )
+def _stringify_rows(rows: Iterable[Mapping[str, object]], fields: Sequence[str]) -> List[Dict[str, str]]:
+    return [{field: str(row.get(field, "")) for field in fields} for row in rows]
 
 
-def validate_manifest(root: Path, report: ValidationReport) -> None:
-    manifest_path = root / KEY_FILES["manifest"]
-    manifest_rows = read_csv_rows(manifest_path)
-    files = list(iter_release_files(root))
-    report.add(
-        "manifest row count",
-        len(manifest_rows) == EXPECTED_MANIFEST_ROWS,
-        "Manifest lists the expected number of package files, excluding itself.",
-        observed=len(manifest_rows),
-        expected=EXPECTED_MANIFEST_ROWS,
-    )
-    report.add(
-        "release file count",
-        len(files) == EXPECTED_TOTAL_FILES_IN_RELEASE,
-        "Release directory contains the expected total number of files, including the manifest.",
-        observed=len(files),
-        expected=EXPECTED_TOTAL_FILES_IN_RELEASE,
-    )
+def manifest_rows_equivalent(
+    observed: Sequence[Mapping[str, object]], expected: Sequence[Mapping[str, object]]
+) -> bool:
+    """Compare manifest content independently of presentation row order."""
 
-    listed_paths = [row["relative_path"].replace("\\", "/") for row in manifest_rows]
-    report.add(
-        "manifest excludes itself",
-        KEY_FILES["manifest"] not in listed_paths,
-        "The public manifest intentionally does not list public_dataset_manifest.csv itself.",
-        observed=KEY_FILES["manifest"] in listed_paths,
-        expected=False,
-    )
-
-    actual_paths = {rel_path(root, p): p for p in files}
-    missing = [p for p in listed_paths if p not in actual_paths]
-    unlisted = sorted(set(actual_paths) - set(listed_paths) - {KEY_FILES["manifest"]})
-    report.add("manifest listed files exist", not missing, "Every manifest-listed file exists.", observed=missing, expected=[])
-    report.add("no unlisted data files", not unlisted, "No non-manifest files are present apart from the manifest.", observed=unlisted, expected=[])
-
-    for row in manifest_rows:
-        relative_path = row["relative_path"].replace("\\", "/")
-        path = root / relative_path
-        if not path.exists():
-            continue
-        expected_size = int(row["file_size_bytes"]) if row.get("file_size_bytes") else None
-        report.add(
-            f"file size: {relative_path}",
-            expected_size is None or path.stat().st_size == expected_size,
-            "File size matches manifest.",
-            observed=path.stat().st_size,
-            expected=expected_size,
+    def normalize(rows: Sequence[Mapping[str, object]]) -> List[Tuple[str, ...]]:
+        return sorted(
+            tuple(str(row.get(field, "")) for field in MANIFEST_FIELDS)
+            for row in rows
         )
-        expected_sha = row.get("sha256", "")
-        actual_sha = sha256_file(path)
-        report.add(
-            f"sha256: {relative_path}",
-            actual_sha == expected_sha,
-            "SHA-256 matches manifest.",
-            observed=actual_sha,
-            expected=expected_sha,
-        )
-        if path.suffix.lower() == ".csv":
-            header, count = csv_header_and_count(path)
-            expected_rows = int(row["row_count"]) if row.get("row_count") else None
-            expected_cols = int(row["column_count"]) if row.get("column_count") else None
-            expected_columns = row.get("columns", "")
-            report.add(
-                f"csv row count: {relative_path}",
-                expected_rows is None or count == expected_rows,
-                "CSV row count matches manifest.",
-                observed=count,
-                expected=expected_rows,
-            )
-            report.add(
-                f"csv column count: {relative_path}",
-                expected_cols is None or len(header) == expected_cols,
-                "CSV column count matches manifest.",
-                observed=len(header),
-                expected=expected_cols,
-            )
-            report.add(
-                f"csv columns: {relative_path}",
-                ";".join(header) == expected_columns,
-                "CSV header matches manifest column list.",
-                observed=";".join(header),
-                expected=expected_columns,
-            )
+
+    return normalize(observed) == normalize(expected)
 
 
-def validate_expected_counts(root: Path, report: ValidationReport) -> None:
-    for relative_path, (expected_rows, expected_cols) in EXPECTED_CSV_COUNTS.items():
-        path = root / relative_path
+def validate_manifest(root: Path, report: ValidationReport, config: Mapping[str, object]) -> None:
+    manifest_path = root / cfg_path(config, "manifest_file")
+    rows = read_csv_rows(manifest_path)
+    header, _ = csv_header_and_count(manifest_path)
+    report.add("manifest columns", header == MANIFEST_FIELDS, "Manifest uses the required column order.", header, MANIFEST_FIELDS)
+    listed = [row.get("relative_path", "").replace("\\", "/") for row in rows]
+    report.add("manifest paths unique", len(listed) == len(set(listed)), "Manifest relative paths are unique.")
+    report.add(
+        "manifest entry count",
+        len(rows) == expected_counts(config)["manifest_entries"],
+        "Manifest contains the configured number of non-self entries.",
+        len(rows),
+        expected_counts(config)["manifest_entries"],
+    )
+    actual = {rel_path(root, path): path for path in iter_release_files(root)}
+    manifest_rel = cfg_path(config, "manifest_file")
+    report.add("manifest excludes itself", manifest_rel not in listed, "The manifest does not hash itself.")
+    report.add("manifest files exist", not (set(listed) - set(actual)), "All manifest-listed files exist.", sorted(set(listed) - set(actual)), [])
+    report.add("no unlisted files", not (set(actual) - set(listed) - {manifest_rel}), "Every release file except the manifest is listed.", sorted(set(actual) - set(listed) - {manifest_rel}), [])
+    regenerated = generate_manifest_rows(root, manifest_descriptions(root, config))
+    report.add(
+        "manifest fully reproducible",
+        manifest_rows_equivalent(rows, regenerated),
+        "Paths, sizes, hashes, CSV metadata, descriptions, and roles match a fresh rebuild independent of row order.",
+    )
+    expected_hash = str(config.get("expected_manifest_sha256", ""))
+    report.add("manifest exact v5.5 hash", sha256_file(manifest_path) == expected_hash, "Manifest is the exact Zenodo-uploaded v5.5 artifact.", sha256_file(manifest_path), expected_hash)
+
+
+def validate_expected_counts(root: Path, report: ValidationReport, config: Mapping[str, object]) -> None:
+    for relative, (wanted_rows, wanted_columns) in expected_table_counts(config).items():
+        path = root / relative
+        report.add(f"required file: {relative}", path.exists(), "Required release file exists.")
         if not path.exists():
-            report.add(f"expected file exists: {relative_path}", False, "Required public CSV is missing.")
             continue
         header, rows = csv_header_and_count(path)
-        report.add(
-            f"expected rows: {relative_path}",
-            rows == expected_rows,
-            "Required CSV has the expected row count.",
-            observed=rows,
-            expected=expected_rows,
-        )
-        report.add(
-            f"expected columns: {relative_path}",
-            len(header) == expected_cols,
-            "Required CSV has the expected column count.",
-            observed=len(header),
-            expected=expected_cols,
-        )
+        report.add(f"expected rows: {relative}", rows == wanted_rows, "Row count matches v5.5 configuration.", rows, wanted_rows)
+        report.add(f"unique columns: {relative}", len(header) == len(set(header)), "CSV header contains no duplicate fields.")
+        if wanted_columns is not None:
+            report.add(f"expected columns: {relative}", len(header) == wanted_columns, "Column count matches v5.5 schema.", len(header), wanted_columns)
+    for key in ("dual_qa_xlsx", "challenge_qa_xlsx", "qa_stage_summary", "release_build_summary", "publication_readiness"):
+        relative = required_files(config)[key]
+        report.add(f"required file: {relative}", (root / relative).is_file(), "Required v5.5 release artifact exists.")
 
 
-def duplicate_count(values: Iterable[str]) -> int:
-    seen = set()
-    duplicates = 0
-    for value in values:
-        if value in seen:
-            duplicates += 1
-        else:
-            seen.add(value)
-    return duplicates
+def _parse_numeric(value: str) -> bool:
+    try:
+        number = Decimal(str(value).strip())
+    except (InvalidOperation, ValueError):
+        return False
+    return number.is_finite()
 
 
-def validate_cross_file_links(root: Path, report: ValidationReport) -> None:
-    inventory_ids = {row["report_id"] for row in iter_csv_rows(root / KEY_FILES["report_inventory"])}
-    corrected_rows = read_csv_rows(root / KEY_FILES["measurements_corrected"])
-    corrected_measurement_ids = [row["measurement_id"] for row in corrected_rows]
-    corrected_measurement_id_set = set(corrected_measurement_ids)
-    corrected_candidate_ids = {row["measurement_row_candidate_id"] for row in corrected_rows}
-    corrected_parameter_codes = {row["parameter_code"] for row in corrected_rows}
-    standardized_candidate_ids = {
-        row["measurement_row_candidate_id"] for row in iter_csv_rows(root / KEY_FILES["standardized_candidates"])
-    }
-    pollutant_codes = {row["parameter_code"] for row in iter_csv_rows(root / KEY_FILES["pollutant_dictionary"])}
-    qa_rows = read_csv_rows(root / KEY_FILES["human_qa"])
-    qa_measurement_ids = {row["measurement_id"] for row in qa_rows}
-
-    missing_reports = sorted({row["report_id"] for row in corrected_rows} - inventory_ids)
-    missing_candidates = sorted(corrected_candidate_ids - standardized_candidate_ids)
-    missing_parameters = sorted(corrected_parameter_codes - pollutant_codes)
-    missing_qa_measurements = sorted(qa_measurement_ids - corrected_measurement_id_set)
-
-    report.add(
-        "corrected duplicate measurement IDs",
-        duplicate_count(corrected_measurement_ids) == 0,
-        "Corrected v3 measurement IDs are unique.",
-        observed=duplicate_count(corrected_measurement_ids),
-        expected=0,
-    )
-    report.add("corrected report IDs link to inventory", not missing_reports, "All corrected report IDs exist in report inventory.", observed=missing_reports, expected=[])
-    report.add(
-        "corrected row candidates link to standardized layer",
-        not missing_candidates,
-        "All corrected measurement-row candidate IDs exist in the standardized candidate layer.",
-        observed=missing_candidates[:10],
-        expected=[],
-    )
-    report.add(
-        "corrected parameter codes link to dictionary",
-        not missing_parameters,
-        "All corrected parameter codes exist in pollutant_dictionary.csv.",
-        observed=missing_parameters,
-        expected=[],
-    )
-    report.add(
-        "human QA measurement IDs link to corrected table",
-        not missing_qa_measurements,
-        "All human QA measurement IDs exist in the corrected v3 measurement table.",
-        observed=missing_qa_measurements[:10],
-        expected=[],
-    )
+def _numeric_equal(left: str, right: str) -> bool:
+    try:
+        return Decimal(left) == Decimal(right)
+    except (InvalidOperation, ValueError):
+        return False
 
 
-def count_values(rows: Iterable[Dict[str, str]], field: str) -> Counter:
-    counter: Counter = Counter()
+def validate_curated_measurements(root: Path, report: ValidationReport, config: Mapping[str, object]) -> None:
+    files = required_files(config)
+    path = root / files["curated_measurements"]
+    rows = read_csv_rows(path)
+    required = {"measurement_id", "measurement_row_candidate_id", "report_id", "parameter_code", "value", "year"}
+    header, _ = csv_header_and_count(path)
+    report.add("curated required fields", required <= set(header), "Required curated-measurement fields exist.", sorted(required - set(header)), [])
+    missing = {field: sum(not row.get(field, "").strip() for row in rows) for field in required}
+    report.add("curated required fields complete", all(count == 0 for count in missing.values()), "Required fields are nonblank.", missing, {field: 0 for field in required})
+    identifiers = [row.get("measurement_id", "") for row in rows]
+    report.add("measurement_id unique", duplicate_count(identifiers) == 0, "Curated measurement identifiers are unique.")
+    invalid_numeric = [row.get("measurement_id", "") for row in rows if not _parse_numeric(row.get("value", ""))]
+    report.add("numeric values valid", not invalid_numeric, "All curated values are finite decimal numbers.", invalid_numeric[:10], [])
+    invalid_years = [row.get("measurement_id", "") for row in rows if not str(config["temporal_start"]) <= row.get("year", "") <= str(config["temporal_end"])]
+    report.add("measurement years in scope", not invalid_years, "All measurement years are within configured temporal coverage.", invalid_years[:10], [])
+    invalid_dates: List[str] = []
     for row in rows:
-        counter[row.get(field, "")] += 1
-    return counter
+        valid_flag = row.get("sample_date_valid", "").strip().lower()
+        sample_date = row.get("sample_date", "").strip()
+        if valid_flag not in {"true", "false", "not_applicable"}:
+            invalid_dates.append(row.get("measurement_id", ""))
+        elif valid_flag == "true":
+            try:
+                date.fromisoformat(sample_date)
+            except ValueError:
+                invalid_dates.append(row.get("measurement_id", ""))
+        elif sample_date:
+            invalid_dates.append(row.get("measurement_id", ""))
+    report.add("sample date semantics", not invalid_dates, "Valid dates are ISO dates; invalid/not-applicable dates are blank.", invalid_dates[:10], [])
+    expected_hash = str(config.get("expected_main_measurement_sha256", ""))
+    observed_hash = sha256_file(path)
+    report.add("main table exact v5.5 hash", observed_hash == expected_hash, "Main table is byte-identical to the Zenodo-uploaded v5.5 table.", observed_hash, expected_hash)
 
 
-def validate_human_qa(root: Path, report: ValidationReport) -> None:
-    qa_rows = read_csv_rows(root / KEY_FILES["human_qa"])
-    checks = {
-        "human_review_status": ("reviewed", 800),
-        "human_reviewer_id": ("R1", 800),
-        "human_review_date": ("2026-07-03", 800),
-        "human_accepted_measurement_supported": ("yes", 800),
-        "human_false_accept": ("no", 800),
-        "human_error_category": ("none", 800),
-        "adjudication_required": ("no", 800),
+def validate_identifiers(root: Path, report: ValidationReport, config: Mapping[str, object]) -> None:
+    files = required_files(config)
+    counts = expected_counts(config)
+    curated = read_csv_rows(root / files["curated_measurements"])
+    exclusions = read_csv_rows(root / files["exclusion_audit"])
+    inventory_ids = {row["report_id"] for row in iter_csv_rows(root / files["report_inventory"])}
+    candidate_ids = {row["measurement_row_candidate_id"] for row in iter_csv_rows(root / files["standardized_rows"])}
+    parameter_codes = {row["parameter_code"] for row in iter_csv_rows(root / files["pollutant_dictionary"])}
+    measurement_ids = {row["measurement_id"] for row in curated}
+    exclusion_ids = {row["measurement_id"] for row in exclusions}
+    report.add("report_id foreign key", not ({row["report_id"] for row in curated} - inventory_ids), "All curated reports occur in the report inventory.")
+    report.add("candidate foreign key", not ({row["measurement_row_candidate_id"] for row in curated} - candidate_ids), "All curated rows link to standardized candidate rows.")
+    report.add("parameter dictionary coverage", not ({row["parameter_code"] for row in curated} - parameter_codes), "All curated parameter codes occur in the dictionary.")
+    report.add("exclusion IDs unique", len(exclusion_ids) == len(exclusions), "The cumulative exclusion audit has unique measurement IDs.")
+    report.add("retained/excluded disjoint", not (measurement_ids & exclusion_ids), "No excluded measurement remains in the v5 table.", sorted(measurement_ids & exclusion_ids)[:10], [])
+    report.add("pre-v5 partition count", len(measurement_ids | exclusion_ids) == counts["pre_v5_curated_measurements"], "Retained and cumulatively excluded IDs partition the 20,514-record pre-v5 frame by count.", len(measurement_ids | exclusion_ids), counts["pre_v5_curated_measurements"])
+    frequency_ids = {row["measurement_id"] for row in iter_csv_rows(root / files["frequency_removed"])}
+    report.add("frequency false accepts absent", not (frequency_ids & measurement_ids), "All 559 earlier frequency-context false accepts remain absent from the current table.")
+    duplicate_exclusion_ids = {row["measurement_id"] for row in exclusions if row["exclusion_reason"] == "duplicate_after_parameter_correction"}
+    ammonia_ids = {row["measurement_id"] for row in iter_csv_rows(root / files["ammonia_audit"])}
+    report.add("ammonia duplicate audit synchronized", ammonia_ids == duplicate_exclusion_ids, "The 1,096 ammonia recodes equal the duplicate-after-correction exclusions.", len(ammonia_ids ^ duplicate_exclusion_ids), 0)
+    for label, key in (("stratified QA", "dual_qa_csv"), ("challenge QA", "challenge_qa_csv")):
+        qa = read_csv_rows(root / files[key])
+        missing = [row["measurement_id"] for row in qa if row["measurement_id"] not in measurement_ids | exclusion_ids]
+        wrong_state = [
+            row["measurement_id"]
+            for row in qa
+            if (row["final_correction_action"] == "exclude_record") != (row["measurement_id"] in exclusion_ids)
+        ]
+        report.add(f"{label} ID coverage", not missing, "Every QA ID resolves to a retained or cumulatively excluded measurement.", missing[:10], [])
+        report.add(f"{label} final action applied", not wrong_state, "QA exclusion actions agree with current main/exclusion membership.", wrong_state[:10], [])
+
+
+QA_AGREEMENT_FIELDS = [
+    "parameter_supported",
+    "value_supported",
+    "unit_supported",
+    "medium_supported",
+    "date_supported",
+    "compliance_supported",
+    "accepted_measurement_supported",
+    "false_accept",
+    "error_category",
+]
+
+
+def _qa_needs_adjudication(row: Mapping[str, str]) -> bool:
+    if row.get("reviewer_agreement") == "no":
+        return True
+    if any(row.get(f"{reviewer}_{field}") == "uncertain" for reviewer in ("r1", "r2") for field in QA_AGREEMENT_FIELDS):
+        return True
+    return any(
+        row.get(f"{reviewer}_false_accept") == "yes"
+        or row.get(f"{reviewer}_accepted_measurement_supported") == "no"
+        or row.get(f"{reviewer}_error_category") != "none"
+        for reviewer in ("r1", "r2")
+    )
+
+
+def qa_metrics(rows: Sequence[Mapping[str, str]]) -> Dict[str, object]:
+    return {
+        "records": len(rows),
+        "reviewer_agreement": dict(Counter(row["reviewer_agreement"] for row in rows)),
+        "human_adjudication_required": sum(row["adjudication_required"] == "yes" for row in rows),
+        "human_confirmed_false_accepts": sum(row["adjudication_decision"] == "adjudicator_confirms_false_accept" for row in rows),
+        "human_adjudicated_corrections": sum(row["adjudication_decision"] == "adjudicator_accepts_with_correction" for row in rows),
+        "post_review_rule_exclusions": sum("exclude_record" in row["post_review_decision"] for row in rows),
+        "final_total_exclusions": sum(row["final_correction_action"] == "exclude_record" for row in rows),
+        "final_qa_decisions": dict(Counter(row["final_qa_decision"] for row in rows)),
+        "final_correction_actions": dict(Counter(row["final_correction_action"] for row in rows)),
     }
-    for field, (expected_value, expected_count) in checks.items():
-        counter = count_values(qa_rows, field)
-        observed = counter.get(expected_value, 0)
-        report.add(
-            f"human QA {field}",
-            observed == expected_count,
-            f"Human QA field {field} has the expected completed-review value.",
-            observed=dict(counter),
-            expected={expected_value: expected_count},
-        )
-    report.add(
-        "human QA duplicate sample IDs",
-        duplicate_count(row["qa_sample_id"] for row in qa_rows) == 0,
-        "Human QA sample IDs are unique.",
-        observed=duplicate_count(row["qa_sample_id"] for row in qa_rows),
-        expected=0,
-    )
-    report.add(
-        "human QA duplicate measurement IDs",
-        duplicate_count(row["measurement_id"] for row in qa_rows) == 0,
-        "Human QA measurement IDs are unique.",
-        observed=duplicate_count(row["measurement_id"] for row in qa_rows),
-        expected=0,
-    )
 
 
-def validate_correction_history(root: Path, report: ValidationReport) -> None:
-    original_rows = read_csv_rows(root / KEY_FILES["measurements_original"])
-    corrected_rows = read_csv_rows(root / KEY_FILES["measurements_corrected"])
-    removed_rows = read_csv_rows(root / KEY_FILES["frequency_removed"])
-    ammonia_rows = read_csv_rows(root / KEY_FILES["ammonia_audit"])
-
-    original_ids = {row["measurement_id"] for row in original_rows}
-    corrected_ids = {row["measurement_id"] for row in corrected_rows}
-    removed_ids = {row["measurement_id"] for row in removed_rows}
-
-    report.add(
-        "frequency-context removal count",
-        len(removed_rows) == 559,
-        "Frequency-context false accepts removed from measurement layer.",
-        observed=len(removed_rows),
-        expected=559,
-    )
-    report.add(
-        "original minus corrected equals removed count",
-        len(original_rows) - len(corrected_rows) == len(removed_rows),
-        "The original-to-corrected row-count decrease equals the removed frequency-context row count.",
-        observed=len(original_rows) - len(corrected_rows),
-        expected=len(removed_rows),
-    )
-    report.add(
-        "removed IDs present in original draft",
-        removed_ids <= original_ids,
-        "All removed measurement IDs were present in the superseded original draft table.",
-        observed=len(removed_ids - original_ids),
-        expected=0,
-    )
-    report.add(
-        "removed IDs absent from corrected v3",
-        not (removed_ids & corrected_ids),
-        "Removed frequency-context measurement IDs are absent from corrected v3.",
-        observed=len(removed_ids & corrected_ids),
-        expected=0,
-    )
-    ammonia_ok = all(
-        row.get("old_parameter_code") == "ammonia_air" and row.get("new_parameter_code") == "ammonia_nitrogen"
-        for row in ammonia_rows
-    )
-    report.add(
-        "ammonia correction count",
-        len(ammonia_rows) == 1096,
-        "Water-context ammonia_air rows recoded to ammonia_nitrogen.",
-        observed=len(ammonia_rows),
-        expected=1096,
-    )
-    report.add(
-        "ammonia correction mapping",
-        ammonia_ok,
-        "Every ammonia correction audit row maps ammonia_air to ammonia_nitrogen.",
-        observed="all rows match" if ammonia_ok else "one or more rows differ",
-        expected="all rows match",
-    )
-
-    summary_path = root / KEY_FILES["corrected_generation_summary"]
-    if summary_path.exists():
-        summary = json.loads(summary_path.read_text(encoding="utf-8"))
-        report.add(
-            "color unit recode count",
-            summary.get("color_platinum_cobalt_unit_recoded_to_degree") == 7,
-            "Corrected generation summary records 7 color unit recodes to degree.",
-            observed=summary.get("color_platinum_cobalt_unit_recoded_to_degree"),
-            expected=7,
-        )
-
-
-def figure_measurements_by_year(root: Path) -> List[Dict[str, object]]:
-    counter = count_values(iter_csv_rows(root / KEY_FILES["measurements_corrected"]), "year")
-    return [{"year": year, "draft_measurement_count": counter[year]} for year in sorted(counter, key=lambda y: int(y))]
-
-
-def figure_measurements_by_medium(root: Path) -> List[Dict[str, object]]:
-    counter = count_values(iter_csv_rows(root / KEY_FILES["measurements_corrected"]), "media")
-    return [{"media": media, "draft_measurement_count": counter[media]} for media in sorted(counter)]
-
-
-def figure_measurements_by_parameter(root: Path) -> List[Dict[str, object]]:
-    counter = count_values(iter_csv_rows(root / KEY_FILES["measurements_corrected"]), "parameter_code")
-    items = sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))
-    return [{"parameter_code": key, "draft_measurement_count": value} for key, value in items]
-
-
-def figure_reports_by_year(root: Path) -> List[Dict[str, object]]:
-    counter = count_values(iter_csv_rows(root / KEY_FILES["report_inventory"]), "year")
-    return [{"name": year, "count": counter[year]} for year in sorted(counter, key=lambda y: int(y))]
-
-
-def figure_reports_by_facility_type(root: Path) -> List[Dict[str, object]]:
-    counter = count_values(iter_csv_rows(root / KEY_FILES["report_inventory"]), "facility_type")
-    items = sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))
-    return [{"name": key, "count": value} for key, value in items]
-
-
-def figure_table_layer_scale(root: Path) -> List[Dict[str, object]]:
-    def rows_for(relative_path: str) -> int:
-        return csv_header_and_count(root / relative_path)[1]
-
-    return [
-        {
-            "layer": "Parsed DOCX reports",
-            "count": rows_for(KEY_FILES["docx_metadata"]),
-            "unit": "reports",
-            "notes": "Reports with extractable DOCX table structures",
-        },
-        {
-            "layer": "Public table-cell records",
-            "count": rows_for(KEY_FILES["docx_table_cells"]),
-            "unit": "records",
-            "notes": "De-identified table-cell structural records",
-        },
-        {
-            "layer": "Broad measurement candidate rows",
-            "count": rows_for(KEY_FILES["measurement_candidates"]),
-            "unit": "rows",
-            "notes": "Rows with possible measurement evidence before conservative acceptance",
-        },
-        {
-            "layer": "Numeric-token candidates",
-            "count": rows_for(KEY_FILES["token_candidates"]),
-            "unit": "tokens",
-            "notes": "Numeric expressions extracted from candidate contexts",
-        },
-        {
-            "layer": "Standardized parameter-row candidates",
-            "count": rows_for(KEY_FILES["standardized_candidates"]),
-            "unit": "records",
-            "notes": "Candidate rows linked to standardized parameter codes",
-        },
-        {
-            "layer": "Corrected v3 draft measurements",
-            "count": rows_for(KEY_FILES["measurements_corrected"]),
-            "unit": "records",
-            "notes": "Current corrected draft long-form measurement layer",
-        },
-        {
-            "layer": "Pollutant dictionary",
-            "count": rows_for(KEY_FILES["pollutant_dictionary"]),
-            "unit": "parameter_codes",
-            "notes": "Standard parameter codes used for harmonization",
-        },
+def _validate_qa_table(
+    rows: Sequence[Mapping[str, str]], label: str, id_field: str, report: ValidationReport
+) -> None:
+    ids = [row.get(id_field, "") for row in rows]
+    measurement_ids = [row.get("measurement_id", "") for row in rows]
+    report.add(f"{label} sample IDs complete and unique", all(ids) and len(ids) == len(set(ids)), "QA sample identifiers are nonblank and unique.")
+    report.add(f"{label} measurement IDs unique", len(measurement_ids) == len(set(measurement_ids)), "A measurement appears at most once in this QA sample.")
+    required_result_fields = [
+        *(f"r1_{field}" for field in QA_AGREEMENT_FIELDS),
+        "r1_review_status",
+        "r1_notes",
+        *(f"r2_{field}" for field in QA_AGREEMENT_FIELDS),
+        "r2_review_status",
+        "r2_notes",
+        "reviewer_agreement",
+        "adjudication_required",
+        "adjudicator_id",
+        "adjudication_decision",
+        "final_qa_decision",
+        "final_correction_action",
+        "post_review_audit_status",
     ]
+    missing = [(row.get(id_field, ""), field) for row in rows for field in required_result_fields if not row.get(field, "").strip()]
+    report.add(f"{label} completed review fields", not missing, "All required human-review, adjudication, and final-action fields are complete.", missing[:10], [])
+    status_bad = [row.get(id_field, "") for row in rows if row.get("r1_review_status") != "reviewed_human_independent_blinded" or row.get("r2_review_status") != "reviewed_human_independent_blinded"]
+    report.add(f"{label} independent blinded status", not status_bad, "R1 and R2 statuses record independent blinded human review.", status_bad[:10], [])
+    agreement_bad = [
+        row.get(id_field, "")
+        for row in rows
+        if (row.get("reviewer_agreement") == "yes")
+        != all(row.get(f"r1_{field}") == row.get(f"r2_{field}") for field in QA_AGREEMENT_FIELDS)
+    ]
+    report.add(f"{label} reviewer agreement recomputed", not agreement_bad, "reviewer_agreement equals a fresh field-level R1/R2 comparison.", agreement_bad[:10], [])
+    adjudication_bad = [row.get(id_field, "") for row in rows if (row.get("adjudication_required") == "yes") != _qa_needs_adjudication(row)]
+    report.add(f"{label} adjudication requirement recomputed", not adjudication_bad, "Human adjudication is required exactly for disagreement, uncertainty, or a reviewer-identified error.", adjudication_bad[:10], [])
+    stage_bad: List[str] = []
+    for row in rows:
+        required = row.get("adjudication_required") == "yes"
+        if required:
+            ok = row.get("adjudicator_id") == "HUM_ADJ01" and row.get("adjudication_decision") != "not_required_reviewers_agree"
+        else:
+            ok = row.get("adjudicator_id") == "not_applicable" and row.get("adjudication_decision") == "not_required_reviewers_agree"
+        human_fields = " ".join(row.get(field, "") for field in ("adjudicator_id", "adjudication_decision"))
+        if not ok or "POST_REVIEW_RULE_AUDIT" in human_fields or "post_review_rule" in human_fields.lower():
+            stage_bad.append(row.get(id_field, ""))
+    report.add(f"{label} human/rule stage separation", not stage_bad, "Human adjudication fields contain only HUM_ADJ01/not_applicable outcomes; deterministic results remain in post_review_*.", stage_bad[:10], [])
+    report.add(f"{label} post-review audit complete", all(row.get("post_review_audit_status") == "checked" for row in rows), "Every record has a completed post-review audit status.")
+    final_bad = [
+        row.get(id_field, "")
+        for row in rows
+        if (row.get("final_correction_action") == "exclude_record") != (row.get("final_qa_decision") == "confirmed_false_accept")
+        or ("exclude_record" in row.get("post_review_decision", "") and row.get("final_correction_action") != "exclude_record")
+        or (row.get("adjudication_decision") == "adjudicator_confirms_false_accept" and row.get("final_correction_action") != "exclude_record")
+    ]
+    report.add(f"{label} final decisions consistent", not final_bad, "Human and deterministic exclusions propagate to the final decision/action fields.", final_bad[:10], [])
+    date_bad: List[str] = []
+    for row in rows:
+        value = row.get("sample_date", "")
+        flag = row.get("sample_date_valid", "").lower()
+        if flag in {"true", "1"}:
+            try:
+                date.fromisoformat(value)
+            except ValueError:
+                date_bad.append(row.get(id_field, ""))
+        elif value:
+            date_bad.append(row.get(id_field, ""))
+    report.add(f"{label} ISO sample dates", not date_bad, "Only valid sample dates are populated and they use ISO YYYY-MM-DD.", date_bad[:10], [])
 
 
-def normalize_rows_for_compare(rows: List[Dict[str, object]]) -> List[Dict[str, str]]:
-    return [{key: str(value) for key, value in row.items()} for row in rows]
+def _xlsx_column_number(reference: str) -> int:
+    match = re.match(r"[A-Z]+", reference)
+    if not match:
+        raise ValueError(f"Invalid XLSX cell reference: {reference}")
+    number = 0
+    for character in match.group(0):
+        number = number * 26 + ord(character) - 64
+    return number
 
 
-def compare_figure_file(root: Path, relative_path: str, generated_rows: List[Dict[str, object]], report: ValidationReport) -> None:
-    existing = read_csv_rows(root / relative_path)
-    generated = normalize_rows_for_compare(generated_rows)
-    report.add(
-        f"figure source matches: {relative_path}",
-        existing == generated,
-        "Regenerated figure source data matches the deposited file.",
-        observed=generated,
-        expected=existing,
+def read_xlsx_sheets(path: Path) -> Dict[str, List[List[str]]]:
+    """Read cell values from an XLSX workbook with no third-party dependency."""
+
+    with zipfile.ZipFile(path) as archive:
+        workbook = ET.fromstring(archive.read("xl/workbook.xml"))
+        relationships = ET.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
+        targets = {item.attrib["Id"]: item.attrib["Target"] for item in relationships}
+        shared: List[str] = []
+        if "xl/sharedStrings.xml" in archive.namelist():
+            shared_root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+            for item in shared_root.findall("main:si", XLSX_NS):
+                shared.append("".join(node.text or "" for node in item.findall(".//main:t", XLSX_NS)))
+        result: Dict[str, List[List[str]]] = {}
+        sheet_parent = workbook.find("main:sheets", XLSX_NS)
+        if sheet_parent is None:
+            raise ValueError(f"Workbook has no sheets: {path}")
+        for sheet in sheet_parent:
+            relationship_id = sheet.attrib[f"{{{XLSX_NS['rel']}}}id"]
+            target = targets[relationship_id].lstrip("/")
+            if not target.startswith("xl/"):
+                target = "xl/" + target
+            sheet_root = ET.fromstring(archive.read(target))
+            output_rows: List[List[str]] = []
+            for row in sheet_root.findall(".//main:sheetData/main:row", XLSX_NS):
+                values: Dict[int, str] = {}
+                for cell in row.findall("main:c", XLSX_NS):
+                    index = _xlsx_column_number(cell.attrib["r"])
+                    cell_type = cell.attrib.get("t", "n")
+                    if cell_type == "inlineStr":
+                        value = "".join(node.text or "" for node in cell.findall(".//main:t", XLSX_NS))
+                    else:
+                        node = cell.find("main:v", XLSX_NS)
+                        value = "" if node is None else (node.text or "")
+                        if cell_type == "s" and value:
+                            value = shared[int(value)]
+                        elif cell_type == "b":
+                            value = "true" if value == "1" else "false"
+                    values[index] = value
+                width = max(values, default=0)
+                output_rows.append([values.get(column, "") for column in range(1, width + 1)])
+            result[sheet.attrib["name"]] = output_rows
+        return result
+
+
+def _spreadsheet_values_equal(csv_value: str, xlsx_value: str) -> bool:
+    if csv_value == xlsx_value:
+        return True
+    try:
+        left = Decimal(csv_value)
+        right = Decimal(xlsx_value)
+    except (InvalidOperation, ValueError):
+        return False
+    tolerance = Decimal("1e-12") * max(Decimal(1), abs(left), abs(right))
+    return abs(left - right) <= tolerance
+
+
+def _validate_csv_xlsx_pair(
+    csv_path: Path, xlsx_path: Path, first_sheet: str, required_sheets: Sequence[str], label: str, report: ValidationReport
+) -> Dict[str, List[List[str]]]:
+    with csv_path.open("r", encoding="utf-8-sig", newline="") as handle:
+        csv_rows = list(csv.reader(handle))
+    sheets = read_xlsx_sheets(xlsx_path)
+    report.add(f"{label} workbook sheets", list(sheets) == list(required_sheets), "Workbook contains the required sheets in order.", list(sheets), list(required_sheets))
+    workbook_rows = sheets.get(first_sheet, [])
+    differences: List[Tuple[int, int, str, str]] = []
+    if len(csv_rows) != len(workbook_rows):
+        differences.append((0, 0, str(len(csv_rows)), str(len(workbook_rows))))
+    else:
+        for row_number, (csv_row, workbook_row) in enumerate(zip(csv_rows, workbook_rows), start=1):
+            if len(csv_row) != len(workbook_row):
+                differences.append((row_number, 0, str(len(csv_row)), str(len(workbook_row))))
+                continue
+            for column_number, (csv_value, workbook_value) in enumerate(zip(csv_row, workbook_row), start=1):
+                if not _spreadsheet_values_equal(csv_value, workbook_value):
+                    differences.append((row_number, column_number, csv_value, workbook_value))
+                    if len(differences) >= 20:
+                        break
+            if len(differences) >= 20:
+                break
+    report.add(f"{label} CSV/XLSX synchronization", not differences, "The primary workbook sheet semantically equals the CSV (allowing only binary floating representation noise).", differences, [])
+    return sheets
+
+
+def _sheet_dicts(sheet: Sequence[Sequence[str]]) -> List[Dict[str, str]]:
+    if not sheet:
+        return []
+    header = list(sheet[0])
+    return [{header[index]: row[index] if index < len(row) else "" for index in range(len(header))} for row in sheet[1:]]
+
+
+def validate_overlap_audit(
+    dual: Sequence[Mapping[str, str]], challenge: Sequence[Mapping[str, str]], sheets: Mapping[str, Sequence[Sequence[str]]], report: ValidationReport
+) -> None:
+    dual_by_id = {row["measurement_id"]: row for row in dual}
+    challenge_by_id = {row["measurement_id"]: row for row in challenge}
+    overlap_ids = set(dual_by_id) & set(challenge_by_id)
+    audit = _sheet_dicts(sheets.get("OVERLAP_AUDIT", []))
+    report.add("challenge overlap audit membership", {row.get("measurement_id", "") for row in audit} == overlap_ids, "OVERLAP_AUDIT is freshly tied to the actual eight-file intersection.", sorted({row.get("measurement_id", "") for row in audit} ^ overlap_ids), [])
+    compared_fields = [
+        "parameter_code", "value", "unit", "media", "parameter_group", "standard_limit", "limit_unit", "compliance_flag",
+        "r1_compliance_supported", "r2_compliance_supported", "adjudication_required", "adjudicator_id", "adjudication_decision",
+        "post_review_audit_status", "post_review_error_category", "post_review_decision", "final_qa_decision", "final_correction_action",
+    ]
+    bad: List[str] = []
+    for row in audit:
+        measurement_id = row.get("measurement_id", "")
+        if measurement_id not in overlap_ids:
+            continue
+        left = dual_by_id[measurement_id]
+        right = challenge_by_id[measurement_id]
+        fields_ok = True
+        for field in compared_fields:
+            expected_equal = "yes" if left.get(field, "") == right.get(field, "") else "no"
+            if row.get(f"dual_{field}") != left.get(field, "") or row.get(f"challenge_{field}") != right.get(field, "") or row.get(f"{field}_equal") != expected_equal:
+                fields_ok = False
+        if not fields_ok or row.get("all_compared_fields_equal") != "yes" or row.get("status") != "verified_equal_after_field_level_comparison":
+            bad.append(measurement_id)
+    report.add("challenge overlap audit recomputed", not bad and len(audit) == 8, "All 8 overlap rows and every compared field are recomputed as equal.", bad, [])
+
+
+def validate_qa(root: Path, report: ValidationReport, config: Mapping[str, object]) -> None:
+    files = required_files(config)
+    counts = expected_counts(config)
+    dual = read_csv_rows(root / files["dual_qa_csv"])
+    challenge = read_csv_rows(root / files["challenge_qa_csv"])
+    _validate_qa_table(dual, "stratified 800", "qa_sample_id", report)
+    _validate_qa_table(challenge, "targeted challenge", "challenge_sample_id", report)
+    report.add("stratified QA count", len(dual) == counts["dual_qa_records"], "Completed dual-human-review sample has 800 records.", len(dual), counts["dual_qa_records"])
+    report.add("challenge QA count", len(challenge) == counts["challenge_qa_records"], "Completed targeted challenge sample has 200 records.", len(challenge), counts["challenge_qa_records"])
+    report.add("stratified sampling seed", {row["qa_sampling_seed"] for row in dual} == {"20260705"}, "The public sampling seed is stable and explicit.")
+    weight_sum = sum(Decimal(row["qa_audit_weight"]) for row in dual)
+    report.add("stratified audit-weight target", abs(weight_sum - Decimal(counts["pre_v5_curated_measurements"])) < Decimal("0.00001"), "Design weights sum to the pre-v5 20,514-record frame within documented rounding tolerance.", str(weight_sum), counts["pre_v5_curated_measurements"])
+    report.add("challenge scope", all(row["media"] == "water" and row["parameter_code"] in {"ph", "ammonia_nitrogen", "color"} for row in challenge), "Challenge records are the declared targeted water-parameter sample.")
+    dual_metrics = qa_metrics(dual)
+    challenge_metrics = qa_metrics(challenge)
+    expected_dual = {"human_adjudication_required": 173, "human_confirmed_false_accepts": 16, "human_adjudicated_corrections": 2, "post_review_rule_exclusions": 38, "final_total_exclusions": 54}
+    expected_challenge = {"human_adjudication_required": 41, "human_confirmed_false_accepts": 1, "human_adjudicated_corrections": 0, "post_review_rule_exclusions": 51, "final_total_exclusions": 52}
+    report.add("stratified stage metrics", all(dual_metrics[key] == value for key, value in expected_dual.items()), "Human review, human adjudication, deterministic audit, and final exclusions retain their separate counts.", {key: dual_metrics[key] for key in expected_dual}, expected_dual)
+    report.add("challenge stage metrics", all(challenge_metrics[key] == value for key, value in expected_challenge.items()), "Challenge human and deterministic stages retain their separate counts.", {key: challenge_metrics[key] for key in expected_challenge}, expected_challenge)
+    duplicate_bad = [row["challenge_sample_id"] for row in challenge if "duplicate_after_parameter_correction" in row["post_review_error_category"] and (row["post_review_decision"] != "exclude_record" or row["final_correction_action"] != "exclude_record")]
+    report.add("challenge duplicates excluded", not duplicate_bad, "Every deterministic duplicate-after-parameter-correction finding is excluded.", duplicate_bad[:10], [])
+    dual_sheets = _validate_csv_xlsx_pair(
+        root / files["dual_qa_csv"], root / files["dual_qa_xlsx"], "human_manual_qa_800_dual_review",
+        ["human_manual_qa_800_dual_review", "CHANGE_LOG", "REVIEW_METADATA", "HUMAN_REVIEW_PROTOCOL"], "stratified QA", report,
     )
-
-
-def validate_figure_data(root: Path, report: ValidationReport) -> None:
-    measurements_by_year = figure_measurements_by_year(root)
-    measurements_by_medium = figure_measurements_by_medium(root)
-    reports_by_year = figure_reports_by_year(root)
-    reports_by_facility = figure_reports_by_facility_type(root)
-
-    report.add(
-        "figure measurements by year sum",
-        sum(int(row["draft_measurement_count"]) for row in measurements_by_year) == 20514,
-        "Corrected v3 measurement counts by year sum to the corrected v3 measurement table row count.",
-        observed=sum(int(row["draft_measurement_count"]) for row in measurements_by_year),
-        expected=20514,
+    challenge_sheets = _validate_csv_xlsx_pair(
+        root / files["challenge_qa_csv"], root / files["challenge_qa_xlsx"], "historical_water_challenge",
+        ["historical_water_challenge", "SCORING_AUDIT", "OVERLAP_AUDIT", "CHANGE_LOG", "REVIEW_METADATA", "HUMAN_REVIEW_PROTOCOL"], "challenge QA", report,
     )
-    report.add(
-        "figure measurements by medium sum",
-        sum(int(row["draft_measurement_count"]) for row in measurements_by_medium) == 20514,
-        "Corrected v3 measurement counts by medium sum to the corrected v3 measurement table row count.",
-        observed=sum(int(row["draft_measurement_count"]) for row in measurements_by_medium),
-        expected=20514,
-    )
-    report.add(
-        "figure reports by year sum",
-        sum(int(row["count"]) for row in reports_by_year) == 8265,
-        "Report inventory counts by year sum to the report inventory row count.",
-        observed=sum(int(row["count"]) for row in reports_by_year),
-        expected=8265,
-    )
-    report.add(
-        "figure reports by facility type sum",
-        sum(int(row["count"]) for row in reports_by_facility) == 8265,
-        "Report inventory counts by facility type sum to the report inventory row count.",
-        observed=sum(int(row["count"]) for row in reports_by_facility),
-        expected=8265,
-    )
-
-    compare_figure_file(root, FIGURE_FILES["measurements_by_year"], measurements_by_year, report)
-    compare_figure_file(root, FIGURE_FILES["measurements_by_medium"], measurements_by_medium, report)
-    compare_figure_file(root, FIGURE_FILES["measurements_by_parameter"], figure_measurements_by_parameter(root), report)
-    compare_figure_file(root, FIGURE_FILES["reports_by_year"], reports_by_year, report)
-    compare_figure_file(root, FIGURE_FILES["reports_by_facility_type"], reports_by_facility, report)
-    compare_figure_file(root, FIGURE_FILES["table_layer_scale"], figure_table_layer_scale(root), report)
+    validate_overlap_audit(dual, challenge, challenge_sheets, report)
+    protocol_text = " ".join(" ".join(row) for row in dual_sheets.get("HUMAN_REVIEW_PROTOCOL", []))
+    report.add("reviewer identities and backgrounds documented", all(token in protocol_text for token in ("HUM_R01", "HUM_R02", "HUM_ADJ01", "environmental sciences", "computer science", "nine years")), "Workbook protocol documents the confirmed reviewer/adjudicator identities, professional backgrounds, blinding, and third-party adjudication.")
+    forbidden_paths = [rel_path(root, path) for path in iter_release_files(root) if rel_path(root, path).startswith("qa_templates/") or "dual_review_template" in path.name or "challenge_sample_template" in path.name]
+    report.add("blank QA templates omitted", not forbidden_paths, "The public v5 ZIP includes completed QA results and no blank QA templates.", forbidden_paths, [])
 
 
-def validate_schema_coverage(root: Path, report: ValidationReport) -> None:
-    schema_path = root / KEY_FILES["dataset_schema"]
-    schema_rows = read_csv_rows(schema_path)
-    schema_file_names = {row["file_name"] for row in schema_rows if row.get("file_name")}
-    package_file_names = {path.name for path in iter_release_files(root)}
-    missing = sorted(schema_file_names - package_file_names)
-    report.add(
-        "dataset_schema file coverage",
-        not missing,
-        "Every file_name referenced by dataset_schema.csv is present in the package by file name.",
-        observed=missing,
-        expected=[],
-    )
+def _audit_current_mismatches(
+    main_by_id: Mapping[str, Mapping[str, str]], rows: Sequence[Mapping[str, str]], field_map: Mapping[str, str]
+) -> List[Tuple[str, str, str, str]]:
+    bad: List[Tuple[str, str, str, str]] = []
+    for row in rows:
+        measurement_id = row.get("measurement_id", "")
+        current = main_by_id.get(measurement_id)
+        if current is None:
+            bad.append((measurement_id, "membership", "missing", "retained"))
+            continue
+        for audit_field, main_field in field_map.items():
+            expected = row.get(audit_field, "")
+            observed = current.get(main_field, "")
+            if audit_field in {"canonical_value", "corrected_value"}:
+                equal = _numeric_equal(expected, observed)
+            else:
+                equal = expected == observed
+            if not equal:
+                bad.append((measurement_id, main_field, observed, expected))
+    return bad
 
 
-def validate_disclosure_scan(root: Path, report: ValidationReport) -> None:
-    original_report_files = []
-    sensitive_hits = []
+def _limit_number(value: str) -> Optional[Decimal]:
+    match = re.fullmatch(r"\s*(?:<=|<|≥|>=|≤)?\s*(-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s*", value)
+    if not match:
+        return None
+    try:
+        return Decimal(match.group(1))
+    except InvalidOperation:
+        return None
+
+
+def validate_v5_corrections(root: Path, report: ValidationReport, config: Mapping[str, object]) -> None:
+    files = required_files(config)
+    main = read_csv_rows(root / files["curated_measurements"])
+    main_by_id = {row["measurement_id"]: row for row in main}
+    exclusions = read_csv_rows(root / files["exclusion_audit"])
+    report.add("all cumulative exclusions applied", all(row["measurement_id"] not in main_by_id and row["final_action"] == "exclude_record" for row in exclusions), "All 1,392 exclusions are absent from the main table and explicitly marked exclude_record.")
+    audits = [
+        ("media/group corrections", files["media_corrections"], {"corrected_media": "media", "corrected_parameter_group": "parameter_group"}),
+        ("unit corrections", files["unit_corrections"], {"corrected_unit": "unit", "corrected_limit_unit": "limit_unit"}),
+        ("floating-value canonicalization", files["floating_value_audit"], {"canonical_value": "value"}),
+        ("fecal limit-unit corrections", files["fecal_limit_unit_audit"], {"corrected_limit_unit": "limit_unit"}),
+        ("censored-compliance review", files["censored_compliance_audit"], {"corrected_value": "value", "corrected_unit": "unit", "corrected_compliance_flag": "compliance_flag"}),
+        ("arsenic normalization", files["arsenic_normalization_audit"], {"corrected_value": "value", "corrected_unit": "unit", "corrected_compliance_flag": "compliance_flag"}),
+    ]
+    for label, relative, mapping in audits:
+        mismatches = _audit_current_mismatches(main_by_id, read_csv_rows(root / relative), mapping)
+        report.add(f"{label} applied to main table", not mismatches, "Every public correction-audit outcome is present in the retained main fields.", mismatches[:10], [])
+    heavy_gas = [row["measurement_id"] for row in main if row["media"] == "water" and row["parameter_code"] in {"mercury", "lead", "arsenic"} and row["unit"] in {"mg/m3", "mg/Nm3"}]
+    report.add("heavy-metal gas units use air medium", not heavy_gas, "No water heavy-metal record retains a gas-volume concentration unit.", heavy_gas[:10], [])
+    anomalous = [
+        row["measurement_id"] for row in main
+        if (row["parameter_code"], row["unit"]) in {
+            ("fecal_coliform", "mg/L"), ("water_temperature", "MPN/L"), ("ph", "mg/L"), ("odor_concentration", "mg/m3")
+        }
+    ]
+    report.add("targeted parameter-unit anomalies resolved", not anomalous, "The 23 source-reviewed parameter-unit anomalies no longer occur in the main table.", anomalous[:10], [])
+    fecal_mismatch = [row["measurement_id"] for row in main if row["parameter_code"] == "fecal_coliform" and row["standard_limit"] and row["unit"] != row["limit_unit"]]
+    report.add("fecal limit-unit mismatches resolved", not fecal_mismatch, "Fecal-coliform measurement and limit units are synchronized where a limit exists.", fecal_mismatch[:10], [])
+    censored_ambiguity: List[str] = []
+    for row in main:
+        if row["qualifier"] not in {"<", "<="} or row["compliance_flag"] != "pass" or row["unit"] != row["limit_unit"]:
+            continue
+        threshold = _limit_number(row["value"])
+        limit = _limit_number(row["standard_limit"])
+        if threshold is not None and limit is not None and threshold > limit:
+            censored_ambiguity.append(row["measurement_id"])
+    report.add("censored-pass ambiguities resolved", not censored_ambiguity, "No retained censored pass has a reporting threshold above its same-unit standard limit.", censored_ambiguity[:10], [])
+    floating_tails = [
+        row["measurement_id"] for row in main
+        if re.fullmatch(r"-?\d+\.\d{12,}", row["value"])
+        and abs(Decimal(row["value"]) - Decimal(row["value"]).to_integral_value()) < Decimal("1e-9")
+    ]
+    report.add("noncanonical binary floating tails absent", not floating_tails, "No near-integer value retains a long binary floating-point tail.", floating_tails[:10], [])
+    dictionary = {row["parameter_code"]: row for row in read_csv_rows(root / files["pollutant_dictionary"])}
+    dictionary_bad = []
+    for parameter in ("mercury", "lead", "arsenic"):
+        row = dictionary.get(parameter, {})
+        media = set(row.get("media", "").split(";"))
+        units = set(row.get("expected_unit_patterns", "").split(";"))
+        if not {"water", "air"} <= media or not {"mg/L", "mg/m3", "mg/Nm3"} <= units:
+            dictionary_bad.append(parameter)
+    report.add("heavy-metal dictionary is multi-media", not dictionary_bad, "Mercury, lead, and arsenic dictionary entries support water/air and liquid/gas units.", dictionary_bad, [])
+    for label, key in (("stratified QA retained-field synchronization", "dual_qa_csv"), ("challenge QA retained-field synchronization", "challenge_qa_csv")):
+        mismatches: List[Tuple[str, str, str, str]] = []
+        common_fields = ["report_id", "table_id", "row_index", "measurement_row_candidate_id", "year", "media", "facility_type", "parameter_code", "parameter_group", "value", "unit", "qualifier", "standard_limit", "limit_unit", "compliance_flag", "sample_date", "sample_date_valid", "date_parse_note", "extraction_confidence", "qa_status", "row_text_hash"]
+        for row in read_csv_rows(root / files[key]):
+            current = main_by_id.get(row["measurement_id"])
+            if current is None:
+                continue
+            for field in common_fields:
+                if field not in row:
+                    continue
+                if field == "value":
+                    equal = _numeric_equal(row[field], current[field])
+                elif field == "standard_limit":
+                    left_limit = _limit_number(row[field])
+                    right_limit = _limit_number(current[field])
+                    equal = row[field] == current[field] or (
+                        left_limit is not None and right_limit is not None and left_limit == right_limit
+                    )
+                else:
+                    equal = row[field] == current[field]
+                if not equal:
+                    mismatches.append((row["measurement_id"], field, row[field], current[field]))
+        report.add(label, not mismatches, "All retained sampled fields reflect the corrected main table (numeric formatting may differ without changing value).", mismatches[:10], [])
+
+
+FIGURE_PATHS = {
+    "measurements_by_year": "docs/figure_source_data/figure_data_measurements_by_year.csv",
+    "measurements_by_medium": "docs/figure_source_data/figure_data_measurements_by_medium.csv",
+    "measurements_by_parameter": "docs/figure_source_data/figure_data_measurements_by_parameter.csv",
+    "reports_by_year": "docs/figure_source_data/figure_data_reports_by_year.csv",
+    "reports_by_facility_type": "docs/figure_source_data/figure_data_reports_by_facility_type.csv",
+    "table_layer_scale": "docs/figure_source_data/figure_data_table_derived_layer_scale.csv",
+}
+
+
+def _sorted_counter_rows(counter: Counter, key_name: str, count_name: str, numeric_key: bool = False) -> List[Dict[str, object]]:
+    if numeric_key:
+        items = sorted(counter.items(), key=lambda item: int(item[0]))
+    else:
+        items = sorted(counter.items(), key=lambda item: (-item[1], item[0]))
+    return [{key_name: key, count_name: count} for key, count in items]
+
+
+def figure_rows(root: Path, config: Mapping[str, object]) -> Dict[str, List[Dict[str, object]]]:
+    files = required_files(config)
+    measurements = list(iter_csv_rows(root / files["curated_measurements"]))
+    inventory = list(iter_csv_rows(root / files["report_inventory"]))
+    counts = expected_counts(config)
+    scale = [
+        {"layer": "Parsed DOCX reports", "count": counts["parsed_docx_reports"], "unit": "reports", "notes": "Reports with machine-readable DOCX table structures"},
+        {"layer": "Public table-cell records", "count": counts["table_cells"], "unit": "records", "notes": "De-identified structural records with redacted placeholders or hashes"},
+        {"layer": "Broad measurement candidate rows", "count": counts["measurement_candidates"], "unit": "rows", "notes": "Possible measurement evidence before conservative acceptance"},
+        {"layer": "Numeric-token candidates", "count": counts["numeric_tokens"], "unit": "tokens", "notes": "Numeric expressions from candidate contexts"},
+        {"layer": "Standardized parameter-row candidates", "count": counts["standardized_parameter_rows"], "unit": "records", "notes": "Candidate rows linked to standardized parameter codes"},
+        {"layer": "Curated measurements", "count": counts["curated_measurements"], "unit": "records", "notes": "Corrected public long-form measurement layer after full scan and targeted source-report follow-up"},
+        {"layer": "Pollutant dictionary", "count": counts["parameter_codes"], "unit": "parameter_codes", "notes": "Standard parameter codes used for harmonisation"},
+    ]
+    return {
+        "measurements_by_year": _sorted_counter_rows(count_values(measurements, "year"), "year", "measurement_count", True),
+        "measurements_by_medium": _sorted_counter_rows(count_values(measurements, "media"), "media", "measurement_count"),
+        "measurements_by_parameter": _sorted_counter_rows(count_values(measurements, "parameter_code"), "parameter_code", "measurement_count"),
+        "reports_by_year": _sorted_counter_rows(count_values(inventory, "year"), "name", "count", True),
+        "reports_by_facility_type": _sorted_counter_rows(count_values(inventory, "facility_type"), "name", "count"),
+        "table_layer_scale": scale,
+    }
+
+
+def write_figure_outputs(root: Path, out_dir: Path, config: Mapping[str, object]) -> None:
+    products = figure_rows(root, config)
+    fields = {
+        "measurements_by_year": ["year", "measurement_count"],
+        "measurements_by_medium": ["media", "measurement_count"],
+        "measurements_by_parameter": ["parameter_code", "measurement_count"],
+        "reports_by_year": ["name", "count"],
+        "reports_by_facility_type": ["name", "count"],
+        "table_layer_scale": ["layer", "count", "unit", "notes"],
+    }
+    for name, rows in products.items():
+        write_csv_rows(out_dir / Path(FIGURE_PATHS[name]).name, fields[name], rows)
+
+
+def validate_figures(root: Path, report: ValidationReport, config: Mapping[str, object]) -> None:
+    for name, generated in figure_rows(root, config).items():
+        existing = read_csv_rows(root / FIGURE_PATHS[name])
+        normalized = [{key: str(value) for key, value in row.items()} for row in generated]
+        report.add(f"figure rebuilt: {name}", existing == normalized, "Deposited figure source equals a fresh rebuild from v5.5 tables.")
+
+
+def validate_schema_and_docs(root: Path, report: ValidationReport, config: Mapping[str, object]) -> None:
+    files = required_files(config)
+    counts = expected_counts(config)
+    schema_rows = read_csv_rows(root / files["schema"])
+    schema_by_file: Dict[str, List[Dict[str, str]]] = defaultdict(list)
+    for row in schema_rows:
+        schema_by_file[row["file_name"]].append(row)
+    actual_csv = {
+        path.name: path
+        for path in iter_release_files(root)
+        if path.suffix.lower() == ".csv" and path.name not in {Path(files["schema"]).name, Path(files["manifest"]).name}
+    }
+    report.add("schema active CSV coverage", set(schema_by_file) == set(actual_csv), "Schema covers every active release CSV except the circular schema and manifest files.", sorted(set(schema_by_file) ^ set(actual_csv)), [])
+    mismatches: List[object] = []
+    for name, path in actual_csv.items():
+        header, row_count = csv_header_and_count(path)
+        definitions = schema_by_file.get(name, [])
+        fields = [row["field_name"] for row in definitions]
+        documented_counts = {row["row_count"] for row in definitions}
+        if fields != header or documented_counts != {str(row_count)} or len(fields) != len(set(fields)):
+            mismatches.append({"file": name, "actual_rows": row_count, "documented_rows": sorted(documented_counts), "header_match": fields == header})
+    report.add("schema headers and row counts", not mismatches, "Each active CSV has exact ordered field coverage and the correct row count.", mismatches[:10], [])
+    report.add("schema represented file count", len(schema_by_file) == counts["schema_files"], "Schema represents 44 active CSV files.", len(schema_by_file), counts["schema_files"])
+    vocab = read_csv_rows(root / files["controlled_vocabularies"])
+    stale = [row["file_name"] for row in vocab if row["file_name"] not in {path.name for path in iter_release_files(root)} or "single_reviewer" in row["file_name"] or "template" in row["file_name"]]
+    report.add("controlled vocabularies use active files", not stale, "Controlled-vocabulary entries contain no stale single-reviewer/template file references.", stale[:10], [])
+    main_name = Path(files["curated_measurements"]).name
+    dual_name = Path(files["dual_qa_csv"]).name
+    challenge_name = Path(files["challenge_qa_csv"]).name
+    texts = {
+        "README.md": (root / "README.md").read_text(encoding="utf-8-sig"),
+        files["schema"]: (root / files["schema"]).read_text(encoding="utf-8-sig"),
+        files["manifest"]: (root / files["manifest"]).read_text(encoding="utf-8-sig"),
+    }
+    for label, text in texts.items():
+        report.add(f"current files documented: {label}", all(name in text for name in (main_name, dual_name, challenge_name)), "Main table and both completed QA CSVs are documented.")
+    for path in (root / "README.md", root / "docs" / "geographic_scope_and_representativeness.md"):
+        content = path.read_text(encoding="utf-8-sig")
+        report.add(f"geographic scope: {path.name}", str(config["geographic_scope"]) in content, "Guizhou scope is explicit.")
+    inaccurate: List[str] = []
+    corpus_pattern = re.compile(r"\breport corpus\b|\bprivate source corpus\b", re.IGNORECASE)
     for path in iter_release_files(root):
-        relative_path = rel_path(root, path)
-        if path.suffix.lower() in ORIGINAL_REPORT_EXTENSIONS:
-            original_report_files.append(relative_path)
-        if path.suffix.lower() not in TEXT_EXTENSIONS_TO_SCAN:
+        if path.suffix.lower() not in TEXT_EXTENSIONS:
             continue
-        try:
-            with path.open("r", encoding="utf-8-sig", errors="ignore") as f:
-                for line_number, line in enumerate(f, start=1):
-                    for label, pattern in SENSITIVE_DISCLOSURE_PATTERNS:
-                        if pattern.search(line):
-                            sensitive_hits.append(
-                                {
-                                    "file": relative_path,
-                                    "line": line_number,
-                                    "pattern": label,
-                                }
-                            )
-                            break
-        except UnicodeDecodeError:
-            continue
+        with path.open("r", encoding="utf-8-sig", errors="ignore") as handle:
+            if any(corpus_pattern.search(line) for line in handle):
+                inaccurate.append(rel_path(root, path))
+    report.add("no inaccurate corpus terminology", not inaccurate, "Formal release files avoid full-text-corpus implications.", inaccurate, [])
+    report.add("current filename excludes draft", "draft" not in main_name.lower(), "The current main filename does not contain draft.")
 
+
+def validate_table_row_semantics(root: Path, report: ValidationReport, config: Mapping[str, object]) -> None:
+    files = required_files(config)
+    counts = expected_counts(config)
+    source_rows = {row["report_id"]: int(row["table_row_count"]) for row in iter_csv_rows(root / files["docx_metadata"])}
+    # Cells belonging to one public (report, table, row) locator are contiguous
+    # in the hash-pinned release table. Count locator transitions instead of
+    # retaining 125,045 tuples, which substantially reduces peak memory.
+    public_rows: Counter = Counter()
+    previous_locator: Optional[Tuple[str, str, str]] = None
+    for row in iter_csv_rows(root / files["table_cells"]):
+        locator = (row["report_id"], row["table_id"], row["row_index"])
+        if locator != previous_locator:
+            public_rows[row["report_id"]] += 1
+            previous_locator = locator
+    differences = {report_id: total - public_rows.get(report_id, 0) for report_id, total in source_rows.items() if total > public_rows.get(report_id, 0)}
+    negative = {report_id: total - public_rows.get(report_id, 0) for report_id, total in source_rows.items() if total < public_rows.get(report_id, 0)}
+    ok = not negative and len(differences) == counts["table_row_count_difference_reports"] and sum(differences.values()) == counts["table_row_count_difference_rows"]
+    report.add("table_row_count semantics recomputed", ok, "Source-parser totals exceed released nonblank row locators for exactly 41 reports and 146 rows, with no negative differences.", {"positive_reports": len(differences), "positive_rows": sum(differences.values()), "negative_reports": len(negative)}, {"positive_reports": 41, "positive_rows": 146, "negative_reports": 0})
+
+
+def validate_summary_metadata(root: Path, report: ValidationReport, config: Mapping[str, object]) -> None:
+    files = required_files(config)
+    counts = expected_counts(config)
+    build = json.loads((root / files["release_build_summary"]).read_text(encoding="utf-8-sig"))
+    observed = build.get("counts", {})
+    expected = {
+        "report_inventory": counts["report_inventory"],
+        "parsed_docx_reports": counts["parsed_docx_reports"],
+        "table_cells": counts["table_cells"],
+        "measurement_candidates": counts["measurement_candidates"],
+        "standardized_parameter_rows": counts["standardized_parameter_rows"],
+        "numeric_tokens": counts["numeric_tokens"],
+        "initial_measurements": counts["initial_measurements"],
+        "pre_v5_curated_measurements": counts["pre_v5_curated_measurements"],
+        "v5_curated_measurements": counts["curated_measurements"],
+        "stratified_dual_review_records": counts["dual_qa_records"],
+        "targeted_challenge_records": counts["challenge_qa_records"],
+        "parameter_codes": counts["parameter_codes"],
+    }
+    report.add("release-build summary counts", all(observed.get(key) == value for key, value in expected.items()), "Deposited build summary agrees with configured v5.5 counts.", {key: observed.get(key) for key in expected}, expected)
+    correction = build.get("v5_correction", {})
+    correction_expected = {"excluded_records": 1392, "output_records": 19122, "media_group_corrections": 58, "unit_corrections": 20, "floating_value_canonicalizations": 56, "limit_unit_corrections": 17, "censored_compliance_pass_to_uncertain": 37, "arsenic_microgram_value_normalizations": 8, "arsenic_compliance_flag_changes": 5}
+    report.add("release-build correction counts", all(correction.get(key) == value for key, value in correction_expected.items()), "Deposited build summary records all v5/v5.5 corrections.", {key: correction.get(key) for key in correction_expected}, correction_expected)
+    report.add("release-build main hash", build.get("main_measurement_v5_sha256") == config.get("expected_main_measurement_sha256"), "Build summary records the exact current-main SHA-256.")
+    qa_summary = json.loads((root / files["qa_stage_summary"]).read_text(encoding="utf-8-sig"))
+    qa_ok = qa_summary.get("stratified_800", {}).get("final_total_exclusions") == 54 and qa_summary.get("targeted_challenge", {}).get("final_total_exclusions") == 52 and qa_summary.get("v5_5_post_review_corrections", {}).get("frozen_r1_r2_fields_overwritten") is False
+    report.add("QA stage summary synchronized", qa_ok, "Deposited QA summary preserves stage counts and confirms frozen R1/R2 fields were not overwritten.")
+    readiness = json.loads((root / files["publication_readiness"]).read_text(encoding="utf-8-sig"))
+    readiness_ok = readiness.get("current_measurement_records") == 19122 and readiness.get("cumulative_exclusions") == 1392 and readiness.get("remaining_fecal_limit_unit_mismatches") == 0 and readiness.get("remaining_censored_compliance_pass_ambiguities") == 0 and readiness.get("remaining_arsenic_microgram_value_normalization_issues") == 0
+    report.add("publication-readiness logic synchronized", readiness_ok, "Deposited readiness report records zero remaining v5.5 logic issues and current counts.")
+
+
+def validate_doi_values(report: ValidationReport, config: Mapping[str, object]) -> None:
+    for key in ("data_doi", "code_doi"):
+        value = str(config.get(key, ""))
+        ok = not value or bool(DOI_RE.fullmatch(value))
+        report.add(f"DOI value: {key}", ok, "DOI is either a valid assigned DOI or blank while unassigned.", value)
+
+
+def validate_disclosure(root: Path, report: ValidationReport) -> None:
+    """Stream disclosure checks without repeated regular expressions over large CSVs."""
+
+    original_reports: List[str] = []
+    sensitive_hits: List[Dict[str, object]] = []
+    labels = (
+        "private data directory",
+        "private crosswalk",
+        "raw report text field",
+        "absolute Windows user path",
+        "source file path field",
+    )
+
+    def matched_labels(line: str) -> List[str]:
+        lowered = line.lower()
+        normalized = lowered.replace("\\", "/")
+        found: List[str] = []
+        if "data_private/" in normalized or normalized.strip() == "data_private":
+            found.append("private data directory")
+        if "source_crosswalk_private" in lowered or "crosswalk_private" in lowered:
+            found.append("private crosswalk")
+        if any(token in lowered for token in ("raw_report_text", "report_text_raw", "row_text_private")):
+            found.append("raw report text field")
+        if ":/users/" in normalized:
+            found.append("absolute Windows user path")
+        if any(token in lowered for token in ("source_file_path", "original_file_path", "absolute_path")):
+            found.append("source file path field")
+        return found
+
+    for path in iter_release_files(root):
+        relative = rel_path(root, path)
+        if path.suffix.lower() in ORIGINAL_REPORT_EXTENSIONS:
+            original_reports.append(relative)
+        if path.suffix.lower() not in TEXT_EXTENSIONS:
+            continue
+        recorded_patterns: set[str] = set()
+        with path.open("r", encoding="utf-8-sig", errors="ignore") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                for label in matched_labels(line):
+                    if label not in recorded_patterns:
+                        sensitive_hits.append(
+                            {"file": relative, "line": line_number, "pattern": label}
+                        )
+                        recorded_patterns.add(label)
+                if len(recorded_patterns) == len(labels):
+                    break
     report.add(
         "no original report files",
-        not original_report_files,
-        "Public package contains no original DOC, DOCX or PDF report files.",
-        observed=original_report_files,
-        expected=[],
+        not original_reports,
+        "The public release contains no source DOC, DOCX, or PDF reports.",
+        original_reports,
+        [],
     )
     report.add(
-        "no sensitive disclosure pattern hits",
+        "no sensitive disclosure patterns",
         not sensitive_hits,
-        "No private path, raw report text, private crosswalk or assistant trace patterns were found.",
-        observed=sensitive_hits[:20],
-        expected=[],
+        "No private paths, crosswalks, or raw source-text fields were found.",
+        sensitive_hits[:20],
+        [],
     )
 
 
-def validate_release(root: Path, zip_info: Optional[Dict[str, object]] = None) -> ValidationReport:
-    report = ValidationReport()
-    validate_zip_info(zip_info, report)
-    validate_manifest(root, report)
-    validate_expected_counts(root, report)
-    validate_cross_file_links(root, report)
-    validate_human_qa(root, report)
-    validate_correction_history(root, report)
-    validate_figure_data(root, report)
-    validate_schema_coverage(root, report)
-    validate_disclosure_scan(root, report)
+def validate_column_hashes(root: Path, report: ValidationReport, config: Mapping[str, object]) -> None:
+    files = required_files(config)
+    main = read_csv_rows(root / files["curated_measurements"])
+    header, _ = csv_header_and_count(root / files["curated_measurements"])
+    audit = read_csv_rows(root / files["column_hashes"])
+    report.add("column-hash field coverage", [row["column_name"] for row in audit] == header, "Column-hash audit follows the exact main-table column order.")
+    bad: List[str] = []
+    for row in audit:
+        column = row["column_name"]
+        digest = hashlib.sha256(("\n".join(item[column] for item in main) + "\n").encode("utf-8")).hexdigest()
+        identical = "true" if row["baseline_v4_sha256"] == row["corrected_v5_sha256"] else "false"
+        if digest != row["corrected_v5_sha256"] or row["identical"] != identical or not SHA256_RE.fullmatch(row["baseline_v4_sha256"]):
+            bad.append(column)
+    report.add("main measurement column hashes", not bad, "Every corrected-v5 column hash is independently recomputed; baseline/current equality flags are truthful.", bad, [])
+
+
+def validate_release(
+    root: Path, config: Mapping[str, object], zip_info: Optional[Mapping[str, object]] = None
+) -> ValidationReport:
+    report = ValidationReport(config)
+    if zip_info is not None:
+        expected_zip = str(config.get("expected_release_zip_sha256", ""))
+        report.add("release ZIP exact v5.5 hash", zip_info.get("sha256") == expected_zip, "Input ZIP is byte-identical to the confirmed Zenodo upload.", zip_info.get("sha256"), expected_zip)
+    validate_manifest(root, report, config)
+    validate_expected_counts(root, report, config)
+    validate_curated_measurements(root, report, config)
+    validate_identifiers(root, report, config)
+    validate_qa(root, report, config)
+    validate_v5_corrections(root, report, config)
+    validate_figures(root, report, config)
+    validate_schema_and_docs(root, report, config)
+    validate_table_row_semantics(root, report, config)
+    validate_summary_metadata(root, report, config)
+    validate_doi_values(report, config)
+    validate_disclosure(root, report)
+    validate_column_hashes(root, report, config)
     return report
 
 
-def manuscript_summary(root: Path, zip_info: Optional[Dict[str, object]] = None) -> Dict[str, object]:
-    counts = {}
-    for name, relative_path in KEY_FILES.items():
-        path = root / relative_path
-        if path.exists() and path.suffix.lower() == ".csv":
-            header, rows = csv_header_and_count(path)
-            counts[name] = {"relative_path": relative_path, "rows": rows, "columns": len(header)}
-
-    measurements_by_year = figure_measurements_by_year(root)
-    measurements_by_medium = figure_measurements_by_medium(root)
-    reports_by_year = figure_reports_by_year(root)
-    reports_by_facility = figure_reports_by_facility_type(root)
-
-    summary = {
-        "dataset_doi": DATASET_DOI,
-        "release_version": RELEASE_VERSION,
-        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
-        "zip": zip_info,
-        "key_table_counts": counts,
-        "correction_history": {
-            "removed_frequency_context_false_accepts": csv_header_and_count(root / KEY_FILES["frequency_removed"])[1],
-            "ammonia_parameter_mapping_rows": csv_header_and_count(root / KEY_FILES["ammonia_audit"])[1],
-            "original_draft_measurements": csv_header_and_count(root / KEY_FILES["measurements_original"])[1],
-            "corrected_v3_draft_measurements": csv_header_and_count(root / KEY_FILES["measurements_corrected"])[1],
+def release_summary(root: Path, config: Mapping[str, object], zip_info: Optional[Mapping[str, object]] = None) -> Dict[str, object]:
+    table_counts: Dict[str, object] = {}
+    for relative in expected_table_counts(config):
+        header, rows = csv_header_and_count(root / relative)
+        table_counts[relative] = {"rows": rows, "columns": len(header)}
+    files = required_files(config)
+    return {
+        "dataset_title": config["dataset_title"],
+        "dataset_version": config["dataset_version"],
+        "dataset_correction_state": config["dataset_correction_state"],
+        "configured_data_doi": config["data_doi"],
+        "previous_data_version_doi": config.get("previous_data_version_doi", ""),
+        "geographic_scope": config["geographic_scope"],
+        "temporal_coverage": [config["temporal_start"], config["temporal_end"]],
+        "zip": dict(zip_info) if zip_info else None,
+        "main_measurement_sha256": sha256_file(root / files["curated_measurements"]),
+        "manifest_sha256": sha256_file(root / files["manifest"]),
+        "table_counts": table_counts,
+        "qa": {
+            "stratified_800": qa_metrics(read_csv_rows(root / files["dual_qa_csv"])),
+            "targeted_challenge": qa_metrics(read_csv_rows(root / files["challenge_qa_csv"])),
         },
-        "figure_source_data": {
-            "measurements_by_year": measurements_by_year,
-            "measurements_by_medium": measurements_by_medium,
-            "reports_by_year": reports_by_year,
-            "reports_by_facility_type": reports_by_facility,
-        },
+        "figure_source_data": figure_rows(root, config),
     }
-    return summary
-
-
-def write_figure_outputs(root: Path, out_dir: Path) -> None:
-    write_csv_rows(
-        out_dir / "figure_data_draft_measurements_by_year_corrected_v3.csv",
-        ["year", "draft_measurement_count"],
-        figure_measurements_by_year(root),
-    )
-    write_csv_rows(
-        out_dir / "figure_data_draft_measurements_by_medium_corrected_v3.csv",
-        ["media", "draft_measurement_count"],
-        figure_measurements_by_medium(root),
-    )
-    write_csv_rows(
-        out_dir / "figure_data_draft_measurements_by_parameter_corrected_v3.csv",
-        ["parameter_code", "draft_measurement_count"],
-        figure_measurements_by_parameter(root),
-    )
-    write_csv_rows(out_dir / "figure_data_reports_by_year.csv", ["name", "count"], figure_reports_by_year(root))
-    write_csv_rows(
-        out_dir / "figure_data_reports_by_facility_type.csv",
-        ["name", "count"],
-        figure_reports_by_facility_type(root),
-    )
-    write_csv_rows(
-        out_dir / "figure_data_table_derived_layer_scale_corrected_v3.csv",
-        ["layer", "count", "unit", "notes"],
-        figure_table_layer_scale(root),
-    )
-
-
-def write_json(path: Path, payload: Dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
 def write_markdown_report(path: Path, report: ValidationReport) -> None:
     lines = [
-        "# EnvCoRe-SW corrected v3 public release validation",
+        "# EnvCoRe-SW public release validation",
         "",
-        f"Dataset DOI: {DATASET_DOI}",
-        f"Release version: {RELEASE_VERSION}",
+        f"Dataset version: {report.config['dataset_version']} ({report.config['dataset_correction_state']} correction state)",
+        f"Configured data DOI: {report.config['data_doi'] or 'not assigned'}",
+        f"Geographic scope: {report.config['geographic_scope']}",
         f"Generated at UTC: {datetime.now(timezone.utc).isoformat()}",
         "",
         f"Validation status: {'PASS' if report.passed else 'FAIL'}",
@@ -852,7 +1301,7 @@ def write_markdown_report(path: Path, report: ValidationReport) -> None:
         "",
     ]
     for check in report.checks:
-        lines.append(f"- {check['status']}: {check['name']} - {check['detail']}")
+        lines.append(f"- {check['status']}: {check['name']} — {check['detail']}")
         if check["status"] != "PASS":
             lines.append(f"  - observed: {check.get('observed')}")
             lines.append(f"  - expected: {check.get('expected')}")
@@ -861,143 +1310,110 @@ def write_markdown_report(path: Path, report: ValidationReport) -> None:
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def _with_release(args: argparse.Namespace):
+    config = load_config(args.config)
+    root, temporary, zip_info = prepare_release(Path(args.release), config)
+    return config, root, temporary, zip_info
+
+
 def command_validate(args: argparse.Namespace) -> int:
-    tmp: Optional[tempfile.TemporaryDirectory] = None
+    config, root, temporary, zip_info = _with_release(args)
     try:
-        root, tmp, zip_info = prepare_release(Path(args.release))
-        report = validate_release(root, zip_info)
-        out_dir = Path(args.out)
-        write_json(out_dir / "validation_report.json", report.to_dict())
-        write_markdown_report(out_dir / "validation_report.md", report)
+        report = validate_release(root, config, zip_info)
+        out = Path(args.out)
+        write_json(out / "validation_report.json", report.to_dict())
+        write_markdown_report(out / "validation_report.md", report)
         print(f"Validation status: {'PASS' if report.passed else 'FAIL'}")
-        print(f"Wrote {out_dir / 'validation_report.md'}")
         return 0 if report.passed else 1
     finally:
-        if tmp is not None:
-            tmp.cleanup()
+        if temporary is not None:
+            temporary.cleanup()
 
 
 def command_figures(args: argparse.Namespace) -> int:
-    tmp: Optional[tempfile.TemporaryDirectory] = None
+    config, root, temporary, _zip_info = _with_release(args)
     try:
-        root, tmp, _zip_info = prepare_release(Path(args.release))
-        write_figure_outputs(root, Path(args.out))
+        write_figure_outputs(root, Path(args.out), config)
         print(f"Wrote regenerated figure source data to {args.out}")
         return 0
     finally:
-        if tmp is not None:
-            tmp.cleanup()
+        if temporary is not None:
+            temporary.cleanup()
 
 
 def command_summary(args: argparse.Namespace) -> int:
-    tmp: Optional[tempfile.TemporaryDirectory] = None
+    config, root, temporary, zip_info = _with_release(args)
     try:
-        root, tmp, zip_info = prepare_release(Path(args.release))
-        write_json(Path(args.out), manuscript_summary(root, zip_info))
+        write_json(Path(args.out), release_summary(root, config, zip_info))
         print(f"Wrote {args.out}")
         return 0
     finally:
-        if tmp is not None:
-            tmp.cleanup()
+        if temporary is not None:
+            temporary.cleanup()
 
 
 def command_manifest(args: argparse.Namespace) -> int:
-    tmp: Optional[tempfile.TemporaryDirectory] = None
+    config, root, temporary, _zip_info = _with_release(args)
     try:
-        root, tmp, _zip_info = prepare_release(Path(args.release))
-        rows = generate_technical_manifest(root)
-        write_csv_rows(
-            Path(args.out),
-            [
-                "file_name",
-                "relative_path",
-                "file_size_bytes",
-                "row_count",
-                "column_count",
-                "columns",
-                "sha256",
-                "generated_at_utc",
-            ],
-            rows,
-        )
+        rows = generate_manifest_rows(root, manifest_descriptions(root, config))
+        write_csv_rows(Path(args.out), MANIFEST_FIELDS, rows)
         print(f"Wrote {args.out}")
         return 0
     finally:
-        if tmp is not None:
-            tmp.cleanup()
+        if temporary is not None:
+            temporary.cleanup()
 
 
 def command_all(args: argparse.Namespace) -> int:
-    tmp: Optional[tempfile.TemporaryDirectory] = None
+    config, root, temporary, zip_info = _with_release(args)
     try:
-        root, tmp, zip_info = prepare_release(Path(args.release))
-        out_dir = Path(args.out)
-        if out_dir.exists() and args.clean:
-            shutil.rmtree(out_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
-
-        write_figure_outputs(root, out_dir / "figure_source_data_rebuilt")
-        write_json(out_dir / "manuscript_key_counts.json", manuscript_summary(root, zip_info))
-        write_csv_rows(
-            out_dir / "regenerated_manifest_technical.csv",
-            [
-                "file_name",
-                "relative_path",
-                "file_size_bytes",
-                "row_count",
-                "column_count",
-                "columns",
-                "sha256",
-                "generated_at_utc",
-            ],
-            generate_technical_manifest(root),
-        )
-        report = validate_release(root, zip_info)
-        write_json(out_dir / "validation_report.json", report.to_dict())
-        write_markdown_report(out_dir / "validation_report.md", report)
+        out = Path(args.out)
+        prepare_all_output_directory(out, args.clean, root)
+        write_figure_outputs(root, out / "figure_source_data_rebuilt", config)
+        write_json(out / "release_summary.json", release_summary(root, config, zip_info))
+        write_csv_rows(out / "regenerated_manifest.csv", MANIFEST_FIELDS, generate_manifest_rows(root, manifest_descriptions(root, config)))
+        report = validate_release(root, config, zip_info)
+        write_json(out / "validation_report.json", report.to_dict())
+        write_markdown_report(out / "validation_report.md", report)
         print(f"Validation status: {'PASS' if report.passed else 'FAIL'}")
-        print(f"Wrote all outputs to {out_dir}")
+        print(f"Wrote all outputs to {out}")
         return 0 if report.passed else 1
     finally:
-        if tmp is not None:
-            tmp.cleanup()
+        if temporary is not None:
+            temporary.cleanup()
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="EnvCoRe-SW corrected v3 public release tools")
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(description="EnvCoRe-SW v5/v5.5 public release validation and figure tools")
+    parser.add_argument("--config", default=str(DEFAULT_CONFIG), help="Path to release_config.yaml")
+    subparsers = parser.add_subparsers(dest="command", required=True)
 
-    def add_release_and_out(p: argparse.ArgumentParser, out_default: str) -> None:
-        p.add_argument("--release", required=True, help="Path to the release ZIP or extracted release directory")
-        p.add_argument("--out", required=True if out_default == "" else False, default=out_default, help="Output path")
+    def add_release_out(command: argparse.ArgumentParser, default: str) -> None:
+        command.add_argument("--release", required=True, help="Exact release directory or ZIP")
+        command.add_argument("--out", default=default, help="Output path")
 
-    p_validate = sub.add_parser("validate", help="Validate the public release")
-    add_release_and_out(p_validate, "outputs/validation_check")
-    p_validate.set_defaults(func=command_validate)
-
-    p_figures = sub.add_parser("figures", help="Regenerate figure source data from the public release")
-    add_release_and_out(p_figures, "outputs/figure_source_data_rebuilt")
-    p_figures.set_defaults(func=command_figures)
-
-    p_summary = sub.add_parser("summary", help="Write manuscript key counts as JSON")
-    add_release_and_out(p_summary, "outputs/manuscript_key_counts.json")
-    p_summary.set_defaults(func=command_summary)
-
-    p_manifest = sub.add_parser("manifest", help="Regenerate a technical manifest")
-    add_release_and_out(p_manifest, "outputs/regenerated_manifest_technical.csv")
-    p_manifest.set_defaults(func=command_manifest)
-
-    p_all = sub.add_parser("all", help="Run validation and regenerate all public reproducibility outputs")
-    add_release_and_out(p_all, "outputs/reproducibility_check")
-    p_all.add_argument("--clean", action="store_true", help="Remove the output directory before writing outputs")
-    p_all.set_defaults(func=command_all)
+    validate = subparsers.add_parser("validate", help="Validate the public release")
+    add_release_out(validate, "outputs/validation_check")
+    validate.set_defaults(func=command_validate)
+    figures = subparsers.add_parser("figures", help="Rebuild figure source data")
+    add_release_out(figures, "outputs/figure_source_data_rebuilt")
+    figures.set_defaults(func=command_figures)
+    summary = subparsers.add_parser("summary", help="Write release counts and metadata as JSON")
+    add_release_out(summary, "outputs/release_summary.json")
+    summary.set_defaults(func=command_summary)
+    manifest = subparsers.add_parser("manifest", help="Regenerate the technical manifest")
+    add_release_out(manifest, "outputs/regenerated_manifest.csv")
+    manifest.set_defaults(func=command_manifest)
+    all_command = subparsers.add_parser("all", help="Validate and rebuild all public reproducibility outputs")
+    add_release_out(all_command, "outputs/reproducibility_check")
+    all_command.add_argument("--clean", action="store_true", help="Remove a safe output directory before writing")
+    all_command.set_defaults(func=command_all)
     return parser
 
 
-def main(argv: Optional[List[str]] = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    return args.func(args)
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
+    return int(args.func(args))
 
 
 if __name__ == "__main__":

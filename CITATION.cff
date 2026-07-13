@@ -1,8 +1,9 @@
 cff-version: 1.2.0
-message: "If you use this code, please cite the EnvCoRe-SW corrected v3 dataset and the archived code release."
-title: "EnvCoRe-SW public reproducibility code, corrected v3"
-version: "corrected_v3_20260707"
-date-released: "2026-07-07"
+message: "If you use this software, please cite the archived code release and the associated EnvCoRe-SW dataset."
+title: "EnvCoRe-SW public validation and figure-generation code"
+type: software
+version: "1.1.0"
+abstract: "Standard-library validation and public-derivative rebuilding code for the EnvCoRe-SW v5 data package after the v5.5 correction follow-up."
 authors:
   - family-names: "Liao"
     given-names: "Juan"
@@ -10,8 +11,17 @@ authors:
     given-names: "Yunfei"
   - family-names: "Liu"
     given-names: "Zhe"
+license: MIT
+repository-code: "https://github.com/jody557/EnvCoRe-SW-public-validation-code"
 preferred-citation:
-  type: data
-  title: "EnvCoRe-SW: A de-identified environmental compliance monitoring report corpus and structured measurement extraction dataset from Southwest China, 2018-2025 (corrected v3)"
-  doi: "10.5281/zenodo.21231126"
+  type: software
+  title: "EnvCoRe-SW public validation and figure-generation code"
+  version: "1.1.0"
   year: 2026
+  authors:
+    - family-names: "Liao"
+      given-names: "Juan"
+    - family-names: "Ruan"
+      given-names: "Yunfei"
+    - family-names: "Liu"
+      given-names: "Zhe"
