@@ -1,7 +1,7 @@
 # Release linkage
 
 - Code version: `2.0.0`
-- Code version DOI: pending Zenodo assignment
+- Code version DOI: `10.5281/zenodo.21731218`
 - Code concept DOI: `10.5281/zenodo.21252349`
 - Immediately preceding code version: `1.1.1`
 - Immediately preceding code DOI: `10.5281/zenodo.21340470`
@@ -9,8 +9,17 @@
 - Target measurement count: `20,023`
 - Target inventory count: `8,259`
 - Target measurement SHA-256: `e1e7f6d0a8679af97359c19529354eb67f7d2e64d160a9f14bd660320e2c9583`
-- Associated new dataset-version DOI: pending publication metadata finalization and Zenodo assignment
 
-`10.5281/zenodo.21339244` is an older dataset record. It is not a software DOI and is not the version DOI for this code package.
+## Associated dataset
 
-Create `2.0.0` as a new software version under concept DOI `10.5281/zenodo.21252349`; do not overwrite `1.1.1` or reuse its version DOI. Add the newly assigned code DOI to the GitHub release description and final citation metadata after deposit. Add the associated new dataset-version DOI using an `isSupplementTo` relation only after that dataset DOI exists.
+- Dataset version: `v6`
+- Dataset version DOI: `10.5281/zenodo.21732007`
+- Dataset concept DOI: `10.5281/zenodo.21231125`
+- Dataset relation to software: `isSupplementedBy`
+- Software relation to dataset: `isSupplementTo`
+
+The software and dataset records are linked bidirectionally through their Zenodo related-work metadata.
+
+`10.5281/zenodo.21339244` is the preceding dataset version record and is not a software DOI.
+
+The immutable Git tag `v2.0.0` and its GitHub Release remain associated with the archived software version DOI `10.5281/zenodo.21731218`. The corresponding EnvCoRe-SW dataset release is archived under version DOI `10.5281/zenodo.21732007`.
