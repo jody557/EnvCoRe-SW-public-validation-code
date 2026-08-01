@@ -1,3 +1,0 @@
-resource,old_version,old_version_doi,new_version,new_version_doi,concept_doi,release_date,notes
-dataset,corrected_v3_20260705,10.5281/zenodo.21231126,v5 (v5.5 corrections applied),10.5281/zenodo.21339244,10.5281/zenodo.21231125,,Fill release date; exact uploaded ZIP SHA-256 36e0bda4a4ffe47427892d88a8ecf7fcfece3e9ef70aa3a2cfff658fa2c4cd9b.
-software,v1.1.0,10.5281/zenodo.21338722,v1.1.1,,10.5281/zenodo.21252349,,Fill assigned DOI/date after archiving the GitHub v1.1.1 release.
