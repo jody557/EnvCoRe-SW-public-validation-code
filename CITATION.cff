@@ -3,6 +3,8 @@ message: "If you use this software, cite the archived code version and its assoc
 title: "EnvCoRe-SW public release validation code"
 type: software
 version: "2.0.0"
+doi: "10.5281/zenodo.21731218"
+date-released: "2026-08-01"
 abstract: "Standard-library validation software for the 20,023-record EnvCoRe-SW release-candidate structure, integrity controls, dictionaries, controlled vocabularies, aggregate validation outputs, and disclosure gates."
 authors:
   - family-names: "Liao"
@@ -13,10 +15,12 @@ authors:
     given-names: "Zhe"
 license: MIT
 repository-code: "https://github.com/jody557/EnvCoRe-SW-public-validation-code"
+
 preferred-citation:
   type: software
   title: "EnvCoRe-SW public release validation code"
   version: "2.0.0"
+  doi: "10.5281/zenodo.21731218"
   year: 2026
   authors:
     - family-names: "Liao"
