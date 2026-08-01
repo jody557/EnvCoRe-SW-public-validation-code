@@ -1,19 +1,16 @@
 # Release linkage
 
-This repository is the public validation and figure-generation companion for the EnvCoRe-SW v5 package with the complete v5.5 correction state.
-
-- Code candidate version: `1.1.1`
-- New code DOI: not yet assigned/recorded
-- Immediately preceding code version DOI: `10.5281/zenodo.21338722` (`1.1.0`; superseded because it referenced a deleted record as the dataset DOI)
-- Earlier corrected-v3 code version DOI: `10.5281/zenodo.21252350` (`1.0.0`)
+- Code version: `2.0.0`
+- Code version DOI: pending Zenodo assignment
 - Code concept DOI: `10.5281/zenodo.21252349`
-- Target data version: `v5` (v5.5 corrections applied)
-- Target data version DOI: `10.5281/zenodo.21339244`
-- Previous published data version DOI: `10.5281/zenodo.21231126`
-- Data concept DOI: `10.5281/zenodo.21231125`
-- Target ZIP SHA-256: `36e0bda4a4ffe47427892d88a8ecf7fcfece3e9ef70aa3a2cfff658fa2c4cd9b`
-- Target manifest SHA-256: `8aadd4ff20d97676737f2406dce7b1ca42be6d75ae43a7c41f5c4db0b35745e4`
-- Main-table SHA-256: `1710733cb527d4241ff8fdeef27ac94a3351393d8621d32a405a02822f91f688`
+- Immediately preceding code version: `1.1.1`
+- Immediately preceding code DOI: `10.5281/zenodo.21340470`
 - Repository: `https://github.com/jody557/EnvCoRe-SW-public-validation-code`
+- Target measurement count: `20,023`
+- Target inventory count: `8,259`
+- Target measurement SHA-256: `e1e7f6d0a8679af97359c19529354eb67f7d2e64d160a9f14bd660320e2c9583`
+- Associated new dataset-version DOI: pending publication metadata finalization and Zenodo assignment
 
-Create software `1.1.1` as a new version under code concept DOI `10.5281/zenodo.21252349`, using `10.5281/zenodo.21338722` as the immediately preceding version. Do not overwrite the existing `v1.1.0` tag or record. After Zenodo assigns the version-specific software DOI, add it to the dataset record `10.5281/zenodo.21339244` as `isSupplementedBy`. The immutable tagged source archive does not need to contain its own subsequently assigned DOI.
+`10.5281/zenodo.21339244` is an older dataset record. It is not a software DOI and is not the version DOI for this code package.
+
+Create `2.0.0` as a new software version under concept DOI `10.5281/zenodo.21252349`; do not overwrite `1.1.1` or reuse its version DOI. Add the newly assigned code DOI to the GitHub release description and final citation metadata after deposit. Add the associated new dataset-version DOI using an `isSupplementTo` relation only after that dataset DOI exists.

@@ -1,9 +1,9 @@
 cff-version: 1.2.0
-message: "If you use this software, please cite the archived code release and the associated EnvCoRe-SW dataset."
-title: "EnvCoRe-SW public validation and figure-generation code"
+message: "If you use this software, cite the archived code version and its associated EnvCoRe-SW dataset version."
+title: "EnvCoRe-SW public release validation code"
 type: software
-version: "1.1.1"
-abstract: "Standard-library validation and public-derivative rebuilding code for the EnvCoRe-SW v5 data package after the v5.5 correction follow-up."
+version: "2.0.0"
+abstract: "Standard-library validation software for the 20,023-record EnvCoRe-SW release-candidate structure, integrity controls, dictionaries, controlled vocabularies, aggregate validation outputs, and disclosure gates."
 authors:
   - family-names: "Liao"
     given-names: "Juan"
@@ -15,8 +15,8 @@ license: MIT
 repository-code: "https://github.com/jody557/EnvCoRe-SW-public-validation-code"
 preferred-citation:
   type: software
-  title: "EnvCoRe-SW public validation and figure-generation code"
-  version: "1.1.1"
+  title: "EnvCoRe-SW public release validation code"
+  version: "2.0.0"
   year: 2026
   authors:
     - family-names: "Liao"

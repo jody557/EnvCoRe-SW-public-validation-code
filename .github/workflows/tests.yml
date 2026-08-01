@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       release_url:
-        description: "Public URL of the exact EnvCoRe-SW v5 ZIP; leave blank for fast tests only"
+        description: "Optional public URL of the exact 19-file EnvCoRe-SW public payload ZIP"
         required: false
         type: string
 
@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 jobs:
-  fast-tests:
+  unit-tests:
     strategy:
       fail-fast: false
       matrix:
@@ -25,12 +25,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Compile all Python files
-        run: python -m compileall -q scripts tests
-      - name: Run release-independent unit tests
-        run: python -m unittest tests.test_unit_helpers -v
-      - name: Verify modular test imports
-        run: python -m unittest tests.test_manifest -v
+      - name: Compile Python sources
+        run: python -m compileall -q envcore_validation scripts tests
+      - name: Run unit and negative-control tests
+        run: python -m unittest discover -s tests -v
 
   full-release-validation:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.release_url != '' }}
@@ -40,17 +38,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Download requested release ZIP
+      - name: Download requested public payload ZIP
         env:
           RELEASE_URL: ${{ inputs.release_url }}
-        run: python -c "import os, urllib.request; urllib.request.urlretrieve(os.environ['RELEASE_URL'], 'EnvCoRe-SW_release.zip')"
-      - name: Validate and rebuild all public outputs with resource metrics
-        run: >-
-          /usr/bin/time -v python scripts/envcore_sw_public_release_tools.py
-          --config config/release_config.yaml all
-          --release EnvCoRe-SW_release.zip
-          --out outputs/reproducibility_check --clean
-      - name: Run complete release-dependent test suite
+        run: python -c "import os, urllib.request; urllib.request.urlretrieve(os.environ['RELEASE_URL'], 'EnvCoRe-SW_public_payload.zip')"
+      - name: Run exact public payload validation
+        run: python scripts/validate_release.py --release EnvCoRe-SW_public_payload.zip --out outputs/public_payload
+      - name: Run integration test
         env:
-          ENVCORE_RELEASE: EnvCoRe-SW_release.zip
-        run: /usr/bin/time -v python -m unittest discover -s tests -v
+          ENVCORE_PUBLIC_RELEASE: EnvCoRe-SW_public_payload.zip
+        run: python -m unittest tests.test_current_release -v

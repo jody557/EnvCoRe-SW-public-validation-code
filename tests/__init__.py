@@ -1,1 +1,1 @@
-"""Automated tests for the public release candidate."""
+"""EnvCoRe-SW validation-code tests."""

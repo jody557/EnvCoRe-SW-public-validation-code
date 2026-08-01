@@ -1,95 +1,97 @@
-# EnvCoRe-SW public validation and figure-generation code
+# EnvCoRe-SW public release validation code
 
-This repository is the public validation companion for the EnvCoRe-SW **v5 data package with all v5.5 follow-up corrections applied**:
+Version `2.0.0` is the validation companion for the current EnvCoRe-SW public-data structure containing **20,023 measurements**, **8,259 public inventory records**, and **122 controlled-vocabulary rows**.
 
-> **EnvCoRe-SW: a de-identified inventory and structured environmental measurement dataset derived from environmental compliance monitoring reports in Guizhou Province, Southwest China, 2018–2025**
+This is a major release because it replaces the public command/configuration contract used by `v1.1.1`. The current interface is a focused release-candidate validator with a JSON configuration schema and deterministic validation reports. The legacy multi-command release/summary/figure-generation interface and YAML configuration are not retained. See `docs/MIGRATION_v1.1.1_to_v2.0.0.md`.
 
-Software version `1.1.1` targets the v5 archive identified by the following hashes. The local/downloaded filename may differ; **SHA-256 is authoritative**:
+The validator uses only the Python standard library. It accepts either an extracted release root or a ZIP with one top-level directory. The default configuration validates the **19-file public distribution payload**. A separate, explicit configuration validates the **24-file internal release-candidate QA package** without mixing the two scopes.
 
-- ZIP SHA-256: `36e0bda4a4ffe47427892d88a8ecf7fcfece3e9ef70aa3a2cfff658fa2c4cd9b`
-- main-table SHA-256: `1710733cb527d4241ff8fdeef27ac94a3351393d8621d32a405a02822f91f688`
-- manifest SHA-256: `8aadd4ff20d97676737f2406dce7b1ca42be6d75ae43a7c41f5c4db0b35745e4`
+## Validation scope
 
-The reserved v5 data-version DOI is [10.5281/zenodo.21339244](https://doi.org/10.5281/zenodo.21339244). It identifies the final cross-platform v5 data archive pinned by the hashes above. The previous published data version is [10.5281/zenodo.21231126](https://doi.org/10.5281/zenodo.21231126).
+The default configuration checks:
 
-## What this code validates
+- archive path safety, duplicate/case-colliding members, and symlinks;
+- the exact 19-file public payload and 6-row public-file manifest in the default public profile;
+- SHA-256, byte size, CSV row count, column count, and CSV/JSON manifest equivalence;
+- pinned hashes for the formal measurement, inventory, dictionary, controlled-vocabulary, known-issue, and aggregate-metric artifacts;
+- 20,023 unique measurement IDs, 8,259 unique report IDs, and complete measurement-to-inventory joins;
+- exact active data-dictionary coverage and a fresh recount of all 122 controlled-vocabulary rows;
+- parameter, medium, parameter-group, and expected-unit compatibility, including the five explicitly disclosed source-unit exceptions for `color = mg/L`;
+- the 13 `water_temperature` / `°C` records and frozen dictionary support;
+- Final300, Probability50, and schema-scope metric structure, range checks, and 5,000-replicate declarations;
+- technical gates, incomplete-publication-metadata consistency, and public-text privacy sentinels.
 
-The validator independently checks:
+The optional candidate-QA profile additionally checks the 24-file candidate layout, 23 root checksum entries, CSV/JSON candidate manifests, technical gates, and the incomplete-publication-metadata boundary.
 
-- all 77 manifest entries, sizes, SHA-256 values, CSV row counts, headers, descriptions, and release roles;
-- the 19,122-row current measurement table and its disjoint 1,392-row cumulative exclusion audit;
-- report, candidate, parameter-dictionary, QA, retained-record, and excluded-record identifier relationships;
-- the completed 800-record stratified dual-human review and 200-record targeted challenge review;
-- strict separation of frozen R1/R2 assessments, `HUM_ADJ01` human adjudication, later deterministic `post_review_*` audit fields, and final release actions;
-- semantic CSV/XLSX equality without requiring a third-party spreadsheet library;
-- a fresh field-level reconstruction of the eight-record challenge `OVERLAP_AUDIT`;
-- application of all media/group, unit, floating-value, fecal-limit-unit, censored-compliance, and arsenic source-unit corrections to the main table;
-- resolution of the reviewed parameter–unit anomalies and censored-pass ambiguities;
-- exact active-schema coverage for 44 CSVs, controlled-vocabulary references, table-row-count semantics, summaries, column hashes, and figure source data; and
-- disclosure controls and absence of blank QA templates.
-
-This repository does **not** contain private source reports, readable original report text, source paths, facility names, private crosswalks, or the private extraction/review workspace. It therefore validates the public release and rebuilds public derivatives; it cannot recreate the source-report review decisions from original documents.
+This repository validates public release artifacts and the separately scoped candidate QA package. It does not include source reports, a private crosswalk, row-level review evidence, reviewer identities, or adjudication ledgers, and it does not recalculate source-evidence judgments from private inputs.
 
 ## Requirements
 
-Python 3.9 or newer. Runtime and tests use only the Python standard library.
+Python 3.9 or newer; no third-party packages are required.
 
-## Validate the exact ZIP
-
-```bash
-python scripts/envcore_sw_public_release_tools.py \
-  --config config/release_config.yaml \
-  all \
-  --release path/to/EnvCoRe-SW_public_release_v5.zip \
-  --out outputs/reproducibility_check \
-  --clean
-```
-
-The same command accepts an extracted release root. ZIP input additionally checks the exact confirmed ZIP SHA-256. The `all` command writes a validation report, release summary, regenerated manifest, and rebuilt figure-source CSVs. A conforming package ends with `Validation status: PASS`.
-
-Individual subcommands are also available:
+## Run validation
 
 ```bash
-python scripts/envcore_sw_public_release_tools.py --config config/release_config.yaml validate --release path/to/package.zip --out outputs/validation
-python scripts/envcore_sw_public_release_tools.py --config config/release_config.yaml summary  --release path/to/package.zip --out outputs/release_summary.json
-python scripts/envcore_sw_public_release_tools.py --config config/release_config.yaml figures  --release path/to/package.zip --out outputs/figures
-python scripts/envcore_sw_public_release_tools.py --config config/release_config.yaml manifest --release path/to/package.zip --out outputs/regenerated_manifest.csv
+python scripts/validate_release.py \
+  --release path/to/EnvCoRe-SW_public_payload.zip \
+  --out outputs/public_payload
 ```
 
-## QA summary
+The command writes `validation_report.json` and `validation_report.md`. The report records `validation_profile: public_payload`. Exit code `0` means every required check passed; exit code `1` means at least one check failed; exit code `2` means the input or configuration could not be opened safely.
 
-The QA summarizer refuses incomplete or internally inconsistent review files and reports each review stage separately:
+Validate the 24-file candidate QA package only with the explicit candidate configuration:
 
 ```bash
-python scripts/summarize_dual_reviewer_qa.py \
-  path/to/qa_completed/stratified_800_dual_human_review_v5.csv \
-  --out outputs/stratified_800_summary.json
+python scripts/validate_release.py \
+  --config config/release_candidate_config.json \
+  --release path/to/EnvCoRe-SW_candidate_QA.zip \
+  --out outputs/candidate_qa
 ```
 
-It also accepts `targeted_water_parameter_challenge_review_v5.csv`. When a reviewer field has no category variation, Cohen's kappa is reported as `null` with `kappa_status: not_estimable_no_category_variation`; percent agreement remains available.
+An extracted directory is also accepted:
+
+```bash
+python scripts/validate_release.py --release path/to/extracted/root --out outputs/current_candidate
+```
+
+Additional files are rejected by default. Use `--allow-extra-files` only for a controlled audit workspace; it is not appropriate for validating a distribution ZIP.
 
 ## Tests
 
-`ENVCORE_RELEASE` may point to the ZIP or extracted release root:
+```bash
+python -m compileall -q envcore_validation scripts tests
+python -m unittest discover -s tests -v
+```
+
+To run the integration test against a real candidate:
 
 ```bash
-ENVCORE_RELEASE=path/to/EnvCoRe-SW_public_release_v5.zip \
-python -m unittest discover -s tests -v
+ENVCORE_PUBLIC_RELEASE=path/to/public_payload.zip \
+ENVCORE_CANDIDATE_RELEASE=path/to/candidate_QA.zip \
+python -m unittest tests.test_current_release -v
 ```
 
 PowerShell:
 
 ```powershell
-$env:ENVCORE_RELEASE = "C:\path\to\EnvCoRe-SW_public_release_v5.zip"
-python -m unittest discover -s tests -v
+$env:ENVCORE_PUBLIC_RELEASE = "C:\path\to\public_payload.zip"
+$env:ENVCORE_CANDIDATE_RELEASE = "C:\path\to\candidate_QA.zip"
+python -m unittest tests.test_current_release -v
 ```
 
-GitHub Actions runs release-independent tests on Python 3.9, 3.11, and 3.13 for every push and pull request. A manual workflow can download a user-supplied public release URL, run the exact-hash `all` command, record resource metrics, and execute the full release-dependent suite.
+## Build the code archive
 
-## Release continuity
+First refresh the source checksum list, then create the deterministic archive:
 
-The immediately preceding archived code version is [10.5281/zenodo.21338722](https://doi.org/10.5281/zenodo.21338722) (`v1.1.0`). It is superseded because it referenced a deleted Zenodo record as the dataset DOI. The earlier corrected-v3 code remains at [10.5281/zenodo.21252350](https://doi.org/10.5281/zenodo.21252350). Publish software `1.1.1` as a new version under code concept DOI `10.5281/zenodo.21252349`. The associated data version is [10.5281/zenodo.21339244](https://doi.org/10.5281/zenodo.21339244). The software version DOI is assigned by Zenodo after archiving and should be linked in the dataset record's Related identifiers; it is not required inside the immutable tagged source archive.
+```bash
+python scripts/update_source_checksums.py
+python scripts/create_source_zip.py --out dist/EnvCoRe-SW-public-validation-code_v2.0.0.zip
+```
 
-Files under `zenodo/` whose names contain `template` are preparation aids, not directly submittable metadata. Required unassigned values are null/blank, and must be filled with real assigned values in a separate submission copy.
+The build rejects symlinks, local absolute paths, interpreter caches, local Git metadata, and unlisted build artifacts.
 
-See `RELEASE_NOTES_v1.1.1.md`, `docs/release_linkage.md`, and `zenodo/` for release preparation details.
+## Release linkage
+
+The preceding archived software version is `1.1.1`, DOI `10.5281/zenodo.21340470`, under code concept DOI `10.5281/zenodo.21252349`. The new `2.0.0` version DOI must remain blank inside the immutable source archive until Zenodo assigns it. The associated new dataset-version DOI is intentionally absent and can be added to repository and Zenodo metadata after that DOI exists; its absence does not change the frozen 20,023/8,259 technical target.
+
+DOI `10.5281/zenodo.21339244` is a dataset record and must not be used as the code DOI. See `docs/release_linkage.md` and `zenodo/README.md` before upload.
