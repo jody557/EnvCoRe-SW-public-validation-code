@@ -92,6 +92,8 @@ The build rejects symlinks, local absolute paths, interpreter caches, local Git 
 
 ## Release linkage
 
-The preceding archived software version is `1.1.1`, DOI `10.5281/zenodo.21340470`, under code concept DOI `10.5281/zenodo.21252349`. The new `2.0.0` version DOI must remain blank inside the immutable source archive until Zenodo assigns it. The associated new dataset-version DOI is intentionally absent and can be added to repository and Zenodo metadata after that DOI exists; its absence does not change the frozen 20,023/8,259 technical target.
+The archived software release is version `2.0.0`, DOI `10.5281/zenodo.21731218`, under code concept DOI `10.5281/zenodo.21252349`.
 
-DOI `10.5281/zenodo.21339244` is a dataset record and must not be used as the code DOI. See `docs/release_linkage.md` and `zenodo/README.md` before upload.
+The associated EnvCoRe-SW dataset release is version `v6`, DOI `10.5281/zenodo.21732007`, under dataset concept DOI `10.5281/zenodo.21231125`. The software and dataset records are linked bidirectionally through Zenodo related-work metadata.
+
+The preceding software version is `1.1.1`, DOI `10.5281/zenodo.21340470`. DOI `10.5281/zenodo.21339244` is the preceding dataset version record and must not be used as a software DOI. See `docs/release_linkage.md` for the complete release mapping.
